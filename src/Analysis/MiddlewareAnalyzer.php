@@ -143,6 +143,8 @@ class MiddlewareAnalyzer
         $traverser = new NodeTraverser;
         $visitor = new class($parsed['useMap']) extends NodeVisitorAbstract
         {
+            public array $global = [];
+
             public array $groups = [];
 
             public array $aliases = [];
@@ -170,6 +172,24 @@ class MiddlewareAnalyzer
                 return null;
             }
 
+            public function leaveNode(Node $node): ?int
+            {
+                if (! $node instanceof Node\Expr\MethodCall
+                    || ! $node->name instanceof Node\Identifier
+                    || ! in_array($node->name->toString(), ['append', 'prepend'], true)
+                ) {
+                    return null;
+                }
+
+                $methodName = $node->name->toString();
+                $middlewares = $this->extractMiddlewareList($node);
+                $this->global = $methodName === 'prepend'
+                    ? array_merge($middlewares, $this->global)
+                    : array_merge($this->global, $middlewares);
+
+                return null;
+            }
+
             private function extractAppendList(Node\Expr\MethodCall $node): array
             {
                 foreach ($node->args as $arg) {
@@ -181,6 +201,22 @@ class MiddlewareAnalyzer
                 }
 
                 return [];
+            }
+
+            private function extractMiddlewareList(Node\Expr\MethodCall $node): array
+            {
+                if (count($node->args) === 0 || ! $node->args[0] instanceof Node\Arg) {
+                    return [];
+                }
+
+                $value = $node->args[0]->value;
+                if ($value instanceof Node\Expr\Array_) {
+                    return $this->extractClassArray($value);
+                }
+
+                $middleware = $this->extractClassString($value);
+
+                return $middleware !== null ? [$middleware] : [];
             }
 
             private function extractAliases(Node\Expr\MethodCall $node): void
@@ -256,6 +292,6 @@ class MiddlewareAnalyzer
         $traverser->addVisitor($visitor);
         $traverser->traverse($parsed['ast']);
 
-        return new MiddlewareRegistry([], $visitor->groups, $visitor->aliases);
+        return new MiddlewareRegistry($visitor->global, $visitor->groups, $visitor->aliases);
     }
 }

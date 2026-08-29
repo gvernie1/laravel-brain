@@ -265,6 +265,9 @@ class ProjectAnalyzer
 
         $this->emit('step:start', ['step' => 'middleware', 'label' => 'Scanning middleware', 'message' => '  → Scanning middleware...']);
         $middlewareRegistry = $this->middlewareAnalyzer->analyze($projectRoot);
+        foreach ($routes as $route) {
+            $route->middlewares = array_merge($middlewareRegistry->global, $route->middlewares);
+        }
         $this->emit('step:done', ['step' => 'middleware', 'count' => null, 'unit' => null, 'message' => '    Done']);
 
         $this->emit('step:start', ['step' => 'controllers', 'label' => 'Analyzing controllers', 'message' => '  → Analyzing controllers...']);
