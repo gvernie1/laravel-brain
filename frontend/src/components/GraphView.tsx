@@ -30,13 +30,18 @@ import {
   splitNodeLabel,
 } from '../utils/graphLayoutD3'
 import {
+  EDGE_HIT_TARGET_WIDTH,
   backgroundGesture,
+  clearStandaloneEdgeSelection,
   clearSelection as emptySelection,
+  edgeSelectionPresentation,
   incidentEdgeIds,
   moveNodePositions,
   nodesIntersectingMarquee,
   prepareNodeDrag,
   retainVisibleSelection,
+  selectStandaloneEdge,
+  selectedEdgeEndpointIds,
   selectNode,
   type Point,
   type SelectionState,
@@ -540,8 +545,23 @@ export function GraphView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stressTestNodeId, stressRunKey, edges, edgeVisible, nodeById])
 
+  const interactiveEdges = useMemo(
+    () => edges.filter((edge) =>
+      edgeVisible(edge) &&
+      !collapsedNodes.has(edge.source) &&
+      !hiddenNodeIds.has(edge.source) &&
+      !hiddenNodeIds.has(edge.target),
+    ),
+    [collapsedNodes, edgeVisible, edges, hiddenNodeIds],
+  )
+  const interactiveEdgeIds = useMemo(
+    () => new Set(interactiveEdges.map((edge) => edge.id)),
+    [interactiveEdges],
+  )
+
   const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(new Set())
   const [primarySelectedNodeId, setPrimarySelectedNodeId] = useState<string | null>(null)
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null)
   const [marquee, setMarquee] = useState<MarqueeState | null>(null)
   const marqueeRef = useRef<MarqueeState | null>(null)
   const suppressBackgroundClickRef = useRef(false)
@@ -568,6 +588,14 @@ export function GraphView({
     if (next.primaryId !== primarySelectedNodeId) setPrimarySelectedNodeId(next.primaryId)
   }
 
+  const [previousInteractiveEdgeIds, setPreviousInteractiveEdgeIds] = useState(interactiveEdgeIds)
+  if (!sameIds(previousInteractiveEdgeIds, interactiveEdgeIds)) {
+    setPreviousInteractiveEdgeIds(interactiveEdgeIds)
+    if (selectedEdgeId && !interactiveEdgeIds.has(selectedEdgeId)) {
+      setSelectedEdgeId(clearStandaloneEdgeSelection())
+    }
+  }
+
   const notifiedPrimaryRef = useRef<string | null>(null)
 
   const commitSelection = useCallback((next: SelectionState) => {
@@ -579,6 +607,7 @@ export function GraphView({
 
   const tapNode = useCallback(
     (id: string, additive: boolean) => {
+      setSelectedEdgeId(clearStandaloneEdgeSelection())
       commitSelection(selectNode({
         selectedIds: selectedNodeIds,
         primaryId: primarySelectedNodeId,
@@ -590,6 +619,13 @@ export function GraphView({
   const tapBg = useCallback((event: React.MouseEvent<SVGRectElement>) => {
     if (event.shiftKey) return
     if (suppressBackgroundClickRef.current) return
+    setSelectedEdgeId(clearStandaloneEdgeSelection())
+    commitSelection(emptySelection())
+  }, [commitSelection])
+
+  const tapEdge = useCallback((event: React.MouseEvent<SVGPathElement>, edgeId: string) => {
+    event.stopPropagation()
+    setSelectedEdgeId(selectStandaloneEdge(edgeId))
     commitSelection(emptySelection())
   }, [commitSelection])
 
@@ -600,20 +636,20 @@ export function GraphView({
   }, [onNodeSelect, primarySelectedNodeId])
 
   const highlightEdgeIds = useMemo(() => incidentEdgeIds(
-    edges.filter((edge) =>
-      edgeVisible(edge) &&
-      !collapsedNodes.has(edge.source) &&
-      !hiddenNodeIds.has(edge.source) &&
-      !hiddenNodeIds.has(edge.target),
-    ),
+    interactiveEdges,
     selectedNodeIds,
-  ), [collapsedNodes, edgeVisible, edges, hiddenNodeIds, selectedNodeIds])
+  ), [interactiveEdges, selectedNodeIds])
+  const selectedEdgeNodeIds = useMemo(
+    () => selectedEdgeEndpointIds(interactiveEdges, selectedEdgeId),
+    [interactiveEdges, selectedEdgeId],
+  )
 
   // ── Node drag handlers ─────────────────────────────────────────────────────
   const handleNodePointerDown = useCallback(
     (e: React.PointerEvent<SVGGElement>, nodeId: string) => {
       if (e.button !== 0) return
       e.stopPropagation()
+      setSelectedEdgeId(clearStandaloneEdgeSelection())
       ;(e.currentTarget as SVGGElement).setPointerCapture(e.pointerId)
       isDraggingRef.current = false
 
@@ -752,6 +788,7 @@ export function GraphView({
       selectedIds.add(id)
       primaryId = id
     }
+    setSelectedEdgeId(clearStandaloneEdgeSelection())
     commitSelection({ selectedIds, primaryId })
   }, [commitSelection, effectiveNodes, primarySelectedNodeId, selectableNodeIds, selectedNodeIds])
 
@@ -762,6 +799,7 @@ export function GraphView({
       dragStateRef.current = null
       marqueeRef.current = null
       setMarquee(null)
+      setSelectedEdgeId(clearStandaloneEdgeSelection())
       commitSelection(emptySelection())
     }
     window.addEventListener('keydown', handleKeyDown)
@@ -1094,13 +1132,17 @@ export function GraphView({
 
     const zr = zoom<SVGSVGElement, unknown>()
       .scaleExtent([0.02, 5])
-      .filter((ev) =>
-        !dragStateRef.current &&
-        !marqueeRef.current &&
-        !(ev.shiftKey && ev.type !== 'wheel') &&
-        (!ev.ctrlKey || ev.type === 'wheel') &&
-        !ev.button,
-      )
+      .filter((ev) => {
+        const target = ev.target
+        const edgeHitTarget = target instanceof Element &&
+          target.closest('[data-edge-hit-target="true"]') !== null
+        return !edgeHitTarget &&
+          !dragStateRef.current &&
+          !marqueeRef.current &&
+          !(ev.shiftKey && ev.type !== 'wheel') &&
+          (!ev.ctrlKey || ev.type === 'wheel') &&
+          !ev.button
+      })
       .on('zoom', (ev) => {
         transformRef.current = ev.transform
         select(g).attr('transform', ev.transform.toString())
@@ -1252,9 +1294,7 @@ export function GraphView({
             onPointerCancel={(event) => finishMarquee(event, true)}
             style={{ pointerEvents: 'all' }}
           />
-          {edges.map((e) => {
-            if (!edgeVisible(e)) return null
-            if (collapsedNodes.has(e.source) || hiddenNodeIds.has(e.source) || hiddenNodeIds.has(e.target)) return null
+          {interactiveEdges.map((e) => {
             const ns = effectiveNodeById.get(e.source)
             const nt = effectiveNodeById.get(e.target)
             if (!ns || !nt) return null
@@ -1263,6 +1303,7 @@ export function GraphView({
             const lbl = labelForEdge(e.data, dark)
             const hi = highlightEdgeIds.has(e.id)
             const st = stressSets.edges.has(e.id)
+            const edgeSelection = edgeSelectionPresentation(e.id, selectedEdgeId)
             let stroke = edgeLine
             let sw = 1.75
             let mo = 'url(#arrow-def)'
@@ -1279,11 +1320,37 @@ export function GraphView({
               mo = 'url(#arrow-hi)'
               op = 1
             }
-            if (searchMatch && !(searchMatch.has(e.source) || searchMatch.has(e.target))) {
+            if (edgeSelection.selected) {
+              stroke = HIGHLIGHT_COLOR
+              sw = edgeSelection.strokeWidth
+              mo = 'url(#arrow-hi)'
+              op = 1
+            } else if (edgeSelection.dimmed) {
+              op *= edgeSelection.opacity
+            }
+            if (
+              !edgeSelection.selected &&
+              searchMatch &&
+              !(searchMatch.has(e.source) || searchMatch.has(e.target))
+            ) {
               op *= 0.02
             }
             return (
-              <g key={e.id}>
+              <g key={e.id} data-edge-selected={edgeSelection.selected || undefined}>
+                <path
+                  d={dStr}
+                  fill="none"
+                  stroke="transparent"
+                  strokeWidth={EDGE_HIT_TARGET_WIDTH}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  data-edge-hit-target="true"
+                  onPointerDown={(event) => {
+                    if (event.button === 0) event.stopPropagation()
+                  }}
+                  onClick={(event) => tapEdge(event, e.id)}
+                  style={{ pointerEvents: 'stroke', cursor: 'pointer' }}
+                />
                 <path
                   d={dStr}
                   fill="none"
@@ -1293,10 +1360,19 @@ export function GraphView({
                   strokeLinejoin="round"
                   opacity={op}
                   markerEnd={mo}
-                  style={{ pointerEvents: 'auto' }}
+                  style={{
+                    pointerEvents: 'none',
+                    filter: edgeSelection.selected
+                      ? `drop-shadow(0 0 5px ${HIGHLIGHT_COLOR})`
+                      : undefined,
+                  }}
                 />
                 {lbl && op > 0.05 && (
-                  <g className="g-edge-label" transform={`translate(${mid.x},${mid.y})`}>
+                  <g
+                    className="g-edge-label"
+                    transform={`translate(${mid.x},${mid.y})`}
+                    opacity={edgeSelection.selected ? 1 : op}
+                  >
                     <text
                       textAnchor="middle"
                       dominantBaseline="middle"
@@ -1326,7 +1402,8 @@ export function GraphView({
             if (hiddenNodeIds.has(n.id)) return null
             const typeOk = isTypeVisible(n.data.type)
             const nodeDim = searchMatch && !searchMatch.has(n.id)
-            const opacity = !typeOk ? 0 : nodeDim ? 0.07 : 1
+            const edgeEndpoint = selectedEdgeNodeIds.has(n.id)
+            const opacity = !typeOk ? 0 : edgeEndpoint ? 1 : nodeDim ? 0.07 : 1
             const stN = stressSets.nodes.has(n.id)
             const selected = selectedNodeIds.has(n.id)
             const primarySelected = primarySelectedNodeId === n.id
@@ -1366,6 +1443,7 @@ export function GraphView({
                 style={{ pointerEvents: typeOk && opacity > 0.05 ? 'auto' : 'none', cursor: 'grab' }}
                 data-selected={selected || undefined}
                 data-primary-selected={primarySelected || undefined}
+                data-edge-endpoint={edgeEndpoint || undefined}
                 onPointerDown={(ev) => handleNodePointerDown(ev, n.id)}
                 onPointerMove={(ev) => handleNodePointerMove(ev, n.id)}
                 onPointerUp={(ev) => handleNodePointerUp(ev, n.id)}
@@ -1384,6 +1462,17 @@ export function GraphView({
                     <rect x={-hw - 3} y={-hh - 3} width={w + 6} height={h + 6}
                       rx={compact ? 7 : 13} fill="none" stroke={HIGHLIGHT_COLOR}
                       strokeWidth={primarySelected ? 3 : 2} opacity={0.95} />
+                  </>
+                )}
+
+                {edgeEndpoint && (
+                  <>
+                    <rect x={-hw - 5} y={-hh - 5} width={w + 10} height={h + 10}
+                      rx={compact ? 9 : 15} fill="none" stroke={HIGHLIGHT_COLOR}
+                      strokeWidth={7} opacity={0.16} />
+                    <rect x={-hw - 3} y={-hh - 3} width={w + 6} height={h + 6}
+                      rx={compact ? 7 : 13} fill="none" stroke={HIGHLIGHT_COLOR}
+                      strokeWidth={2.5} opacity={0.9} strokeDasharray="6 3" />
                   </>
                 )}
 

@@ -1,12 +1,18 @@
 import { describe, expect, it } from 'vitest'
 import {
+  EDGE_HIT_TARGET_WIDTH,
+  EDGE_SELECTED_STROKE_WIDTH,
   backgroundGesture,
+  clearStandaloneEdgeSelection,
   clearSelection,
+  edgeSelectionPresentation,
   incidentEdgeIds,
   moveNodePositions,
   nodesIntersectingMarquee,
   prepareNodeDrag,
   retainVisibleSelection,
+  selectStandaloneEdge,
+  selectedEdgeEndpointIds,
   selectNode,
   type SelectionState,
 } from '../src/utils/graphSelection'
@@ -135,5 +141,41 @@ describe('group dragging and edge highlighting', () => {
     ], new Set(['a', 'c']), (edge) => edge.id !== 'hidden')
 
     expect([...edgeIds]).toEqual(['a-b', 'b-c', 'c-d'])
+  })
+})
+
+describe('standalone edge selection', () => {
+  const edges = [
+    { id: 'a-b', source: 'a', target: 'b' },
+    { id: 'b-c', source: 'b', target: 'c' },
+  ]
+
+  it('selects a clicked edge and clears it from a background action', () => {
+    const selectedEdgeId = selectStandaloneEdge('a-b')
+
+    expect(selectedEdgeId).toBe('a-b')
+    expect(clearStandaloneEdgeSelection()).toBeNull()
+  })
+
+  it('gives the selected edge a strong highlight and dims unrelated edges', () => {
+    const selected = edgeSelectionPresentation('a-b', 'a-b')
+    const unrelated = edgeSelectionPresentation('b-c', 'a-b')
+
+    expect(selected.selected).toBe(true)
+    expect(selected.strokeWidth).toBe(EDGE_SELECTED_STROKE_WIDTH)
+    expect(selected.opacity).toBe(1)
+    expect(unrelated.dimmed).toBe(true)
+    expect(unrelated.opacity).toBeLessThan(0.2)
+  })
+
+  it('emphasizes the selected edge source and target nodes', () => {
+    expect([...selectedEdgeEndpointIds(edges, 'a-b')]).toEqual(['a', 'b'])
+  })
+
+  it('uses an invisible hit stroke wider than both normal and selected strokes', () => {
+    expect(EDGE_HIT_TARGET_WIDTH).toBeGreaterThan(EDGE_SELECTED_STROKE_WIDTH)
+    expect(EDGE_HIT_TARGET_WIDTH).toBeGreaterThan(
+      edgeSelectionPresentation('a-b', null).strokeWidth,
+    )
   })
 })

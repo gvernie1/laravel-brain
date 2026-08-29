@@ -30,6 +30,17 @@ export interface TransformLike {
 
 export type BackgroundGesture = 'ignore' | 'marquee' | 'pan'
 
+export const EDGE_HIT_TARGET_WIDTH = 18
+export const EDGE_SELECTED_STROKE_WIDTH = 4
+export const EDGE_DIMMED_OPACITY = 0.12
+
+export interface EdgeSelectionPresentation {
+  selected: boolean
+  dimmed: boolean
+  strokeWidth: number
+  opacity: number
+}
+
 function lastSelected(selectedIds: Set<string>): string | null {
   const ids = [...selectedIds]
   return ids[ids.length - 1] ?? null
@@ -126,6 +137,38 @@ export function incidentEdgeIds(
     }
   }
   return edgeIds
+}
+
+export function selectStandaloneEdge(edgeId: string): string {
+  return edgeId
+}
+
+export function clearStandaloneEdgeSelection(): null {
+  return null
+}
+
+export function edgeSelectionPresentation(
+  edgeId: string,
+  selectedEdgeId: string | null,
+  baseStrokeWidth = 1.75,
+): EdgeSelectionPresentation {
+  const selected = selectedEdgeId === edgeId
+  const dimmed = selectedEdgeId !== null && !selected
+  return {
+    selected,
+    dimmed,
+    strokeWidth: selected ? EDGE_SELECTED_STROKE_WIDTH : baseStrokeWidth,
+    opacity: dimmed ? EDGE_DIMMED_OPACITY : 1,
+  }
+}
+
+export function selectedEdgeEndpointIds(
+  edges: SelectableEdge[],
+  selectedEdgeId: string | null,
+): Set<string> {
+  if (!selectedEdgeId) return new Set()
+  const edge = edges.find((candidate) => candidate.id === selectedEdgeId)
+  return edge ? new Set([edge.source, edge.target]) : new Set()
 }
 
 export function backgroundGesture(button: number, shiftKey: boolean): BackgroundGesture {
