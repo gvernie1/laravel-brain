@@ -315,6 +315,8 @@ export default function App() {
             <GraphView
               key={activeTab?.id}
               elements={elements}
+              projectId={manifest.project}
+              graphId={activeTab?.id ?? 'unknown'}
               layout={layout}
               searchQuery={searchQuery}
               rankDir={rankDir}

@@ -3892,6 +3892,8 @@ kbd, .toolbar-kbd, .stat-chip, .route-row-uri, .route-row-method,
   cursor: pointer;
 }
 .g-tool:hover { color: var(--text); }
+.g-tool:disabled { opacity: .42; cursor: default; }
+.g-tool:disabled:hover { color: var(--dim); }
 .g-tool--on { background: var(--accent-soft); color: var(--text); }
 .g-tool-select {
   background: transparent;

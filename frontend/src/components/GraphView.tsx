@@ -29,6 +29,16 @@ import {
   pickLayoutKind,
   splitNodeLabel,
 } from '../utils/graphLayoutD3'
+import { buildEdgeRouting } from '../utils/graphEdgeRouting'
+import {
+  buildGraphLayoutStorageKey,
+  clearGraphLayout,
+  createGraphLayoutAutosave,
+  getBrowserGraphLayoutStorage,
+  loadGraphLayout,
+  mergeGraphPositions,
+  positionsForExistingNodes,
+} from '../utils/graphLayoutPersistence'
 import {
   EDGE_HIT_TARGET_WIDTH,
   backgroundGesture,
@@ -51,6 +61,7 @@ import {
 
 interface Packet {
   id: string
+  edgeId: string
   waypoints: Array<{ x: number; y: number }> // model-space bend points along the edge path
   progress: number
   speed: number
@@ -139,106 +150,6 @@ function evalPolyline(
   return pts[pts.length - 1]
 }
 
-/**
- * Return the orthogonal-path waypoints for an edge in model space.
- * These mirror the geometry produced by `orthogonalPath` so packets
- * travel along exactly the same route as the drawn SVG edge.
- */
-/**
- * Pick exit/entry ports for an edge based on actual relative node positions.
- * Compares the axis-gap between the two nodes and routes along the dominant axis.
- * This makes edges re-route naturally when nodes are dragged.
- */
-function pickPorts(
-  ns: LayoutNode,
-  nt: LayoutNode,
-): { ex: number; ey: number; tx: number; ty: number; vertical: boolean } {
-  const cdx = nt.x - ns.x
-  const cdy = nt.y - ns.y
-  // Gap between node bounding boxes on each axis (negative = overlapping)
-  const hGap = Math.abs(cdx) - (ns.width + nt.width) / 2
-  const vGap = Math.abs(cdy) - (ns.height + nt.height) / 2
-  const useVertical = vGap >= hGap
-  if (useVertical) {
-    if (cdy >= 0) {
-      return { ex: ns.x, ey: ns.y + ns.height / 2, tx: nt.x, ty: nt.y - nt.height / 2, vertical: true }
-    } else {
-      return { ex: ns.x, ey: ns.y - ns.height / 2, tx: nt.x, ty: nt.y + nt.height / 2, vertical: true }
-    }
-  } else {
-    if (cdx >= 0) {
-      return { ex: ns.x + ns.width / 2, ey: ns.y, tx: nt.x - nt.width / 2, ty: nt.y, vertical: false }
-    } else {
-      return { ex: ns.x - ns.width / 2, ey: ns.y, tx: nt.x + nt.width / 2, ty: nt.y, vertical: false }
-    }
-  }
-}
-
-function orthogonalWaypoints(
-  ns: LayoutNode,
-  nt: LayoutNode,
-): Array<{ x: number; y: number }> {
-  const { ex, ey, tx, ty, vertical } = pickPorts(ns, nt)
-  if (vertical) {
-    if (Math.abs(ex - tx) < 3 || Math.abs(ty - ey) <= 8) {
-      return [{ x: ex, y: ey }, { x: tx, y: ty }]
-    }
-    const midY = (ey + ty) / 2
-    return [{ x: ex, y: ey }, { x: ex, y: midY }, { x: tx, y: midY }, { x: tx, y: ty }]
-  } else {
-    if (Math.abs(ey - ty) < 3 || Math.abs(tx - ex) <= 8) {
-      return [{ x: ex, y: ey }, { x: tx, y: ty }]
-    }
-    const midX = (ex + tx) / 2
-    return [{ x: ex, y: ey }, { x: midX, y: ey }, { x: midX, y: ty }, { x: tx, y: ty }]
-  }
-}
-
-const ORTHO_R = 7 // corner rounding radius
-
-/** Clamp corner radius so it never overflows any of the given segment lengths. */
-function clampR(...dists: number[]): number {
-  return Math.max(0, Math.min(ORTHO_R, ...dists.map((d) => d - 1)))
-}
-
-/**
- * Build an orthogonal (elbow) SVG path between two nodes.
- * Ports are chosen dynamically based on the relative node positions so that
- * edges re-route correctly when nodes are dragged to a new position.
- */
-function orthogonalPath(
-  ns: LayoutNode,
-  nt: LayoutNode,
-): { d: string; lx: number; ly: number; exitX: number; exitY: number; entryX: number; entryY: number } {
-  const { ex, ey, tx, ty, vertical } = pickPorts(ns, nt)
-
-  if (vertical) {
-    if (Math.abs(ex - tx) < 3 || Math.abs(ty - ey) <= 8) {
-      return { d: `M${ex},${ey} L${tx},${ty}`, lx: ex + 6, ly: (ey + ty) / 2, exitX: ex, exitY: ey, entryX: tx, entryY: ty }
-    }
-    const midY = (ey + ty) / 2
-    const dySign = ty > ey ? 1 : -1
-    const r = clampR(Math.abs(midY - ey), Math.abs(ty - midY), Math.abs(tx - ex))
-    const sx = tx > ex ? r : -r
-    const d = r > 0
-      ? `M${ex},${ey} V${midY - r * dySign} Q${ex},${midY} ${ex + sx},${midY} H${tx - sx} Q${tx},${midY} ${tx},${midY + r * dySign} V${ty}`
-      : `M${ex},${ey} V${midY} H${tx} V${ty}`
-    return { d, lx: (ex + tx) / 2, ly: midY - 14 * dySign, exitX: ex, exitY: ey, entryX: tx, entryY: ty }
-  } else {
-    if (Math.abs(ey - ty) < 3 || Math.abs(tx - ex) <= 8) {
-      return { d: `M${ex},${ey} L${tx},${ty}`, lx: (ex + tx) / 2, ly: ey - 10, exitX: ex, exitY: ey, entryX: tx, entryY: ty }
-    }
-    const midX = (ex + tx) / 2
-    const dxSign = tx > ex ? 1 : -1
-    const r = clampR(Math.abs(midX - ex), Math.abs(tx - midX), Math.abs(ty - ey))
-    const sy = ty > ey ? r : -r
-    const d = r > 0
-      ? `M${ex},${ey} H${midX - r * dxSign} Q${midX},${ey} ${midX},${ey + sy} V${ty - sy} Q${midX},${ty} ${midX + r * dxSign},${ty} H${tx}`
-      : `M${ex},${ey} H${midX} V${ty} H${tx}`
-    return { d, lx: midX + 6 * dxSign, ly: (ey + ty) / 2, exitX: ex, exitY: ey, entryX: tx, entryY: ty }
-  }
-}
-
 function labelForEdge(d: LayoutEdge['data'], dark: boolean) {
   const lbl = String(d.label ?? '')
   if (!lbl) return null
@@ -294,6 +205,8 @@ function cardColors(
 
 interface Props {
   elements: GraphElement[]
+  projectId: string
+  graphId: string
   layout: string
   rankDir: 'LR' | 'TB'
   searchQuery: string
@@ -315,6 +228,8 @@ interface Props {
 
 export function GraphView({
   elements,
+  projectId,
+  graphId,
   layout,
   rankDir,
   searchQuery,
@@ -339,6 +254,16 @@ export function GraphView({
   const edgeArrow = dark ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.55)'
 
   const { nodes: baseNodes, edges: baseEdges } = useMemo(() => partitionElements(elements, compact), [elements, compact])
+  const layoutStorageKey = useMemo(() => buildGraphLayoutStorageKey({
+    projectId,
+    graphId,
+    locationId: typeof window === 'undefined'
+      ? import.meta.env.BASE_URL
+      : `${window.location.origin}${import.meta.env.BASE_URL}`,
+    layout,
+    rankDir,
+    compact,
+  }), [compact, graphId, layout, projectId, rankDir])
 
   const visibleNodeCount = useMemo(
     () => baseNodes.filter((n) => visibleTypes.has(String(n.data.type))).length,
@@ -387,7 +312,36 @@ export function GraphView({
   const nodeById = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes])
 
   // ── Per-node drag overrides ────────────────────────────────────────────────
-  const [draggedPositions, setDraggedPositions] = useState<Map<string, { x: number; y: number }>>(new Map())
+  const [draggedPositions, setDraggedPositions] = useState<Map<string, Point>>(() =>
+    positionsForExistingNodes(
+      loadGraphLayout(getBrowserGraphLayoutStorage(), layoutStorageKey),
+      new Set(nodes.map((node) => node.id)),
+    ))
+  const draggedPositionsRef = useRef(draggedPositions)
+  useEffect(() => { draggedPositionsRef.current = draggedPositions }, [draggedPositions])
+  const [layoutAutosave] = useState(() =>
+    createGraphLayoutAutosave(getBrowserGraphLayoutStorage))
+  const [appliedLayoutStorageKey, setAppliedLayoutStorageKey] = useState(layoutStorageKey)
+  const activeLayoutStorageKeyRef = useRef(layoutStorageKey)
+
+  // A view-mode change gets its own stored arrangement. Adjusting state while
+  // rendering prevents one committed frame with the previous mode's overrides.
+  if (appliedLayoutStorageKey !== layoutStorageKey) {
+    setAppliedLayoutStorageKey(layoutStorageKey)
+    setDraggedPositions(positionsForExistingNodes(
+      loadGraphLayout(getBrowserGraphLayoutStorage(), layoutStorageKey),
+      new Set(nodes.map((node) => node.id)),
+    ))
+  }
+
+  useEffect(() => {
+    if (activeLayoutStorageKeyRef.current === layoutStorageKey) return
+    layoutAutosave.flush()
+    activeLayoutStorageKeyRef.current = layoutStorageKey
+  }, [layoutAutosave, layoutStorageKey])
+
+  useEffect(() => () => { layoutAutosave.flush() }, [layoutAutosave])
+
   const dragStateRef = useRef<{
     anchorNodeId: string
     startSX: number
@@ -400,11 +354,19 @@ export function GraphView({
   // ── Collapse state ─────────────────────────────────────────────────────────
   const [collapsedNodes, setCollapsedNodes] = useState<Set<string>>(new Set())
 
-  // Reset drag and collapse state when nodes change (during render, not in an effect).
-  const [prevNodes, setPrevNodes] = useState(nodes)
-  if (prevNodes !== nodes) {
-    setPrevNodes(nodes)
-    setDraggedPositions(new Map())
+  // Reconcile permanent graph membership changes without treating filtering
+  // or an automatic re-layout as a reason to discard surviving manual work.
+  const nodeIdSignature = useMemo(
+    () => nodes.map((node) => node.id).sort().join('\0'),
+    [nodes],
+  )
+  const [previousNodeIdSignature, setPreviousNodeIdSignature] = useState(nodeIdSignature)
+  if (previousNodeIdSignature !== nodeIdSignature) {
+    setPreviousNodeIdSignature(nodeIdSignature)
+    setDraggedPositions((positions) => positionsForExistingNodes(
+      positions,
+      new Set(nodes.map((node) => node.id)),
+    ))
     setCollapsedNodes(new Set())
   }
 
@@ -420,11 +382,6 @@ export function GraphView({
     () => new Map(effectiveNodes.map((n) => [n.id, n])),
     [effectiveNodes],
   )
-
-  // Keep a ref so packet-spawn callbacks always read the latest dragged positions
-  // without needing effectiveNodeById in their dependency arrays.
-  const effectiveNodeByIdRef = useRef(effectiveNodeById)
-  useEffect(() => { effectiveNodeByIdRef.current = effectiveNodeById }, [effectiveNodeById])
 
   const isTypeVisible = useCallback((type: unknown) => visibleTypes.has(String(type)), [visibleTypes])
 
@@ -558,6 +515,14 @@ export function GraphView({
     () => new Set(interactiveEdges.map((edge) => edge.id)),
     [interactiveEdges],
   )
+  const edgeRoutingById = useMemo(
+    () => buildEdgeRouting(effectiveNodes, interactiveEdges),
+    [effectiveNodes, interactiveEdges],
+  )
+  // Packet callbacks may run after a drag or visibility change. Reading the
+  // current route avoids retaining stale sibling port/lane assignments.
+  const edgeRoutingByIdRef = useRef(edgeRoutingById)
+  useEffect(() => { edgeRoutingByIdRef.current = edgeRoutingById }, [edgeRoutingById])
 
   const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(new Set())
   const [primarySelectedNodeId, setPrimarySelectedNodeId] = useState<string | null>(null)
@@ -694,22 +659,25 @@ export function GraphView({
         dx / ds.scale,
         dy / ds.scale,
       )
-      setDraggedPositions((prev) => {
-        const next = new Map(prev)
-        for (const [id, point] of movedPositions) next.set(id, point)
-        return next
-      })
+      const next = mergeGraphPositions(draggedPositionsRef.current, movedPositions)
+      draggedPositionsRef.current = next
+      setDraggedPositions(next)
+      layoutAutosave.schedule(layoutStorageKey, next)
     },
-    [],
+    [layoutAutosave, layoutStorageKey],
   )
 
   const handleNodePointerUp = useCallback((_e: React.PointerEvent<SVGGElement>, nodeId: string) => {
-    if (dragStateRef.current?.anchorNodeId === nodeId) dragStateRef.current = null
-  }, [])
+    if (dragStateRef.current?.anchorNodeId !== nodeId) return
+    dragStateRef.current = null
+    if (isDraggingRef.current) layoutAutosave.flush()
+  }, [layoutAutosave])
 
   const handleNodePointerCancel = useCallback((_e: React.PointerEvent<SVGGElement>, nodeId: string) => {
-    if (dragStateRef.current?.anchorNodeId === nodeId) dragStateRef.current = null
-  }, [])
+    if (dragStateRef.current?.anchorNodeId !== nodeId) return
+    dragStateRef.current = null
+    if (isDraggingRef.current) layoutAutosave.flush()
+  }, [layoutAutosave])
 
   /** Packet animation */
   const containerRef = useRef<HTMLDivElement>(null)
@@ -795,7 +763,7 @@ export function GraphView({
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
-      if (dragStateRef.current) isDraggingRef.current = true
+      if (dragStateRef.current && isDraggingRef.current) layoutAutosave.flush()
       dragStateRef.current = null
       marqueeRef.current = null
       setMarquee(null)
@@ -804,17 +772,15 @@ export function GraphView({
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [commitSelection])
+  }, [commitSelection, layoutAutosave])
 
   const spawnPacket = useCallback(
     (edgeId: string, color: string, delay = 0, chained = false) => {
-      const e = edges.find((x) => x.id === edgeId)
-      if (!e || !edgeVisible(e)) return
-      const ns = effectiveNodeByIdRef.current.get(e.source)
-      const nt = effectiveNodeByIdRef.current.get(e.target)
-      if (!ns || !nt) return
+      const e = interactiveEdges.find((edge) => edge.id === edgeId)
+      const route = edgeRoutingByIdRef.current.get(edgeId)
+      if (!e || !route) return
 
-      const waypoints = orthogonalWaypoints(ns, nt)
+      const waypoints = route.waypoints
 
       // Latency simulation: only for stress-test packets (chained = true)
       const stallAt = chained && Math.random() < 0.65
@@ -827,6 +793,7 @@ export function GraphView({
       setTimeout(() => {
         packetsRef.current.push({
           id: `${edgeId}-${Date.now()}-${Math.random()}`,
+          edgeId,
           waypoints,
           progress: 0,
           speed: 0.0009 + Math.random() * 0.0004,
@@ -843,7 +810,7 @@ export function GraphView({
         })
       }, delay)
     },
-    [edges, edgeVisible],
+    [interactiveEdges],
   )
 
   const spawnChainFromNode = useCallback(
@@ -855,14 +822,13 @@ export function GraphView({
       nodeLastFiredRef.current.set(nodeId, now)
 
       let i = 0
-      for (const edge of edges) {
+      for (const edge of interactiveEdges) {
         if (edge.source !== nodeId) continue
-        if (!edgeVisible(edge)) continue
         spawnPacket(edge.id, color, delay + i * 60, true)
         i++
       }
     },
-    [edges, edgeVisible, spawnPacket],
+    [interactiveEdges, spawnPacket],
   )
 
   useEffect(() => {
@@ -870,9 +836,8 @@ export function GraphView({
 
     const fire = () => {
       let i = 0
-      for (const edge of edges) {
+      for (const edge of interactiveEdges) {
         if (edge.source !== stressTestNodeId) continue
-        if (!edgeVisible(edge)) continue
         spawnPacket(edge.id, '#a855f7', i * 80, true)
         i++
       }
@@ -881,7 +846,7 @@ export function GraphView({
     fire()
     const id = window.setInterval(fire, 700)
     return () => window.clearInterval(id)
-  }, [stressTestNodeId, stressRunKey, edges, edgeVisible, nodeById, spawnPacket])
+  }, [stressTestNodeId, stressRunKey, interactiveEdges, nodeById, spawnPacket])
 
   useEffect(() => {
     let rafId: number
@@ -912,6 +877,11 @@ export function GraphView({
 
       for (const pkt of packetsRef.current) {
         if (!allowPackets) continue
+        const currentRoute = edgeRoutingByIdRef.current.get(pkt.edgeId)
+        if (!currentRoute) continue
+        // Keep in-flight packets on the same live geometry as the SVG when
+        // dragging, filtering, or collapsing redistributes ports and lanes.
+        pkt.waypoints = currentRoute.waypoints
 
         // ── Timeout: packet dies mid-flight with a red explosion ─────────────
         if (pkt.timedOut && pkt.timeoutAt > 0 && pkt.progress >= pkt.timeoutAt) {
@@ -1160,13 +1130,13 @@ export function GraphView({
     const svg = svgRef.current
     const container = containerRef.current
     const zb = zoomBehaviorRef.current
-    if (!svg || !container || !zb || !nodes.length) return
+    if (!svg || !container || !zb || !effectiveNodes.length) return
 
     let minX = Infinity
     let minY = Infinity
     let maxX = -Infinity
     let maxY = -Infinity
-    for (const n of nodes) {
+    for (const n of effectiveNodes) {
       minX = Math.min(minX, n.x - n.width / 2)
       maxX = Math.max(maxX, n.x + n.width / 2)
       minY = Math.min(minY, n.y - n.height / 2)
@@ -1184,7 +1154,15 @@ export function GraphView({
     const ty = h / 2 - scale * cy
     const tr = zoomIdentity.translate(tx, ty).scale(scale)
     select(svg).call(zb.transform, tr)
-  }, [nodes])
+  }, [effectiveNodes])
+
+  const resetManualLayout = useCallback(() => {
+    layoutAutosave.cancel()
+    clearGraphLayout(getBrowserGraphLayoutStorage(), layoutStorageKey)
+    const empty = new Map<string, Point>()
+    draggedPositionsRef.current = empty
+    setDraggedPositions(empty)
+  }, [layoutAutosave, layoutStorageKey])
 
   const zoomBy = useCallback((factor: number) => {
     const svg = svgRef.current
@@ -1295,11 +1273,10 @@ export function GraphView({
             style={{ pointerEvents: 'all' }}
           />
           {interactiveEdges.map((e) => {
-            const ns = effectiveNodeById.get(e.source)
-            const nt = effectiveNodeById.get(e.target)
-            if (!ns || !nt) return null
-            const { d: dStr, lx, ly } = orthogonalPath(ns, nt)
-            const mid = { x: lx, y: ly }
+            const route = edgeRoutingById.get(e.id)
+            if (!route) return null
+            const dStr = route.path
+            const mid = route.labelPoint
             const lbl = labelForEdge(e.data, dark)
             const hi = highlightEdgeIds.has(e.id)
             const st = stressSets.edges.has(e.id)
@@ -1713,7 +1690,10 @@ export function GraphView({
         <select
           className="g-tool-select"
           value={layout}
-          onChange={(e) => onLayoutChange(e.target.value)}
+          onChange={(e) => {
+            layoutAutosave.flush()
+            onLayoutChange(e.target.value)
+          }}
           title="Layout algorithm"
         >
           <option value="dagre">Hierarchical</option>
@@ -1725,7 +1705,10 @@ export function GraphView({
         <button
           type="button"
           className={`g-tool ${rankDir === 'TB' ? 'g-tool--on' : ''}`}
-          onClick={() => onRankDirChange(rankDir === 'TB' ? 'LR' : 'TB')}
+          onClick={() => {
+            layoutAutosave.flush()
+            onRankDirChange(rankDir === 'TB' ? 'LR' : 'TB')
+          }}
           title="Toggle orientation"
         >
           {rankDir === 'TB' ? 'Top-down' : 'Left-right'}
@@ -1755,9 +1738,22 @@ export function GraphView({
         <button
           type="button"
           className={`g-tool ${compact ? 'g-tool--on' : ''}`}
-          onClick={onToggleCompact}
+          onClick={() => {
+            layoutAutosave.flush()
+            onToggleCompact()
+          }}
         >
           Compact
+        </button>
+        <span className="g-tool-sep" />
+        <button
+          type="button"
+          className={`g-tool ${draggedPositions.size > 0 ? 'g-tool--on' : ''}`}
+          onClick={resetManualLayout}
+          disabled={draggedPositions.size === 0}
+          title="Discard the saved manual positions for this graph and view mode"
+        >
+          Reset layout
         </button>
       </div>
 
