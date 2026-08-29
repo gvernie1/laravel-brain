@@ -8,6 +8,7 @@ import type { GraphData } from '../types/graph'
 import { Tooltip } from './Tooltip'
 
 interface Props {
+  layout: string
   nodeCount: number
   edgeCount: number
   visibleCount: number
@@ -60,7 +61,7 @@ function Dropdown({ label, active, children }: { label: string; active?: boolean
 }
 
 export function Toolbar({
-  nodeCount, edgeCount, visibleCount, activeTabLabel,
+  layout, nodeCount, edgeCount, visibleCount, activeTabLabel,
   graphData, analyzedAt, highRiskCount, onOpenRisks, theme, onSearch,
   onToggleTheme, graphRef,
 }: Props) {
@@ -127,7 +128,7 @@ export function Toolbar({
     return `scanned ${formatAge(now - new Date(analyzedAt).getTime())} ago`
   }, [analyzedAt, now])
 
-  const isLarge = nodeCount > LARGE_GRAPH_THRESHOLD
+  const isLargeGraphFallback = layout === 'dagre' && visibleCount > LARGE_GRAPH_THRESHOLD
 
   return (
     <>
@@ -173,9 +174,9 @@ export function Toolbar({
               <span className="risk-pill-count">{highRiskCount}</span>
             </button>
           </Tooltip>
-          {isLarge && (
-            <Tooltip content="Large graph: dagre auto-switched to breadthfirst">
-              <span className="stat-chip stat-chip--warn">⚠ large</span>
+          {isLargeGraphFallback && (
+            <Tooltip content={`Large graph (${visibleCount} visible nodes): using breadth-first instead of Dagre`}>
+              <span className="stat-chip stat-chip--warn">⚠ breadth-first fallback</span>
             </Tooltip>
           )}
           <Tooltip content="Nodes / edges in this graph (visible respects type filters).">

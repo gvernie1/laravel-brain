@@ -235,6 +235,7 @@ export default function App() {
   return (
     <div className="app">
       <Toolbar
+        layout={layout}
         nodeCount={tabState.data?.meta.nodeCount ?? activeTab?.nodeCount ?? 0}
         edgeCount={tabState.data?.meta.edgeCount ?? activeTab?.edgeCount ?? 0}
         visibleCount={visibleNodeCount}

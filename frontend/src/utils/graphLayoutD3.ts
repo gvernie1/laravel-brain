@@ -55,6 +55,8 @@ export const COMPACT_CARD_H = 40
 export const CARD_W_MIN = 185
 export const CARD_W_MAX = 270
 export const COMPACT_CARD_W_MIN = 120
+export const BREADTH_FIRST_NODE_GAP = 48
+export const BREADTH_FIRST_RANK_GAP = 100
 
 export function buildLayoutNode(d: GraphElement['data'], compact = false): LayoutNode {
   const rawLabel = String(d.label ?? d.id)
@@ -142,10 +144,11 @@ export function layoutBreadthFirst(
   nodes: LayoutNode[],
   edges: LayoutEdge[],
   rankDir: 'LR' | 'TB',
-  spacingX = 88,
-  spacingY = 88,
+  nodeGap = BREADTH_FIRST_NODE_GAP,
+  rankGap = BREADTH_FIRST_RANK_GAP,
 ): void {
   const ids = new Set(nodes.map((n) => n.id))
+  const nodeById = new Map(nodes.map((n) => [n.id, n]))
   const adj = new Map<string, string[]>()
   const indeg = new Map<string, number>()
   for (const n of nodes) {
@@ -182,18 +185,59 @@ export function layoutBreadthFirst(
     layers.get(l)!.push(n.id)
   }
   for (const arr of layers.values()) arr.sort()
-  for (const [, idsInLayer] of layers) {
-    const l = level.get(idsInLayer[0])!
-    idsInLayer.forEach((id, i) => {
-      const node = nodes.find((n) => n.id === id)!
+
+  const orderedLayers = [...layers.entries()].sort(([a], [b]) => a - b)
+  const rankBounds: Array<{ center: number; size: number }> = []
+  let rankCenter = 0
+  let previousRankSize = 0
+
+  orderedLayers.forEach(([, idsInLayer], layerIndex) => {
+    const layerNodes = idsInLayer.map((id) => nodeById.get(id)!)
+    const rankSize = Math.max(
+      ...layerNodes.map((node) => rankDir === 'TB' ? node.height : node.width),
+    )
+
+    if (layerIndex > 0) {
+      rankCenter += previousRankSize / 2 + rankGap + rankSize / 2
+    }
+
+    // Pack the cards by their real cross-axis extents, then center the
+    // resulting layer bounds at zero regardless of its card-size mix.
+    const crossAxisSize = layerNodes.reduce(
+      (total, node) => total + (rankDir === 'TB' ? node.width : node.height),
+      nodeGap * Math.max(0, layerNodes.length - 1),
+    )
+    let crossAxisCursor = -crossAxisSize / 2
+
+    layerNodes.forEach((node) => {
       if (rankDir === 'TB') {
-        node.x = i * spacingX - ((idsInLayer.length - 1) * spacingX) / 2
-        node.y = l * spacingY
+        node.x = crossAxisCursor + node.width / 2
+        node.y = rankCenter
+        crossAxisCursor += node.width + nodeGap
       } else {
-        node.x = l * spacingX
-        node.y = i * spacingY - ((idsInLayer.length - 1) * spacingY) / 2
+        node.x = rankCenter
+        node.y = crossAxisCursor + node.height / 2
+        crossAxisCursor += node.height + nodeGap
       }
     })
+
+    rankBounds.push({ center: rankCenter, size: rankSize })
+    previousRankSize = rankSize
+  })
+
+  if (rankBounds.length === 0) return
+
+  const firstRank = rankBounds[0]
+  const lastRank = rankBounds[rankBounds.length - 1]
+  // Keep the complete rank span centered without disturbing layer centering.
+  const graphCenter = (
+    firstRank.center - firstRank.size / 2
+    + lastRank.center + lastRank.size / 2
+  ) / 2
+
+  for (const node of nodes) {
+    if (rankDir === 'TB') node.y -= graphCenter
+    else node.x -= graphCenter
   }
 }
 

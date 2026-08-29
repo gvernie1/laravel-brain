@@ -320,6 +320,10 @@ export function GraphView({
     () => baseNodes.filter((n) => visibleTypes.has(String(n.data.type))).length,
     [baseNodes, visibleTypes],
   )
+  const effectiveLayout = useMemo(
+    () => pickLayoutKind(layout, visibleNodeCount, LARGE_GRAPH_THRESHOLD),
+    [layout, visibleNodeCount],
+  )
 
   const [layoutTick, setLayoutTick] = useState(0)
   const layoutTimeout = useRef<number | null>(null)
@@ -343,19 +347,18 @@ export function GraphView({
     void layoutTick
     const nodesCopy = baseNodes.map((n) => ({ ...n, lines: [...n.lines] }))
     const edgesCopy = baseEdges.map((e) => ({ ...e }))
-    const kind = pickLayoutKind(layout, visibleNodeCount, LARGE_GRAPH_THRESHOLD)
 
-    if (kind === 'dagre') layoutDagre(nodesCopy, edgesCopy, rankDir)
-    else if (kind === 'breadthfirst') layoutBreadthFirst(nodesCopy, edgesCopy, rankDir)
-    else if (kind === 'force') layoutForce(nodesCopy, edgesCopy)
-    else if (kind === 'circle') {
+    if (effectiveLayout === 'dagre') layoutDagre(nodesCopy, edgesCopy, rankDir)
+    else if (effectiveLayout === 'breadthfirst') layoutBreadthFirst(nodesCopy, edgesCopy, rankDir)
+    else if (effectiveLayout === 'force') layoutForce(nodesCopy, edgesCopy)
+    else if (effectiveLayout === 'circle') {
       const r = Math.min(280, 90 + nodesCopy.length * 4)
       layoutCircle(nodesCopy, r)
     } else layoutGrid(nodesCopy, 200, 130)
 
-    centerNodes(nodesCopy)
+    if (effectiveLayout !== 'breadthfirst') centerNodes(nodesCopy)
     return { nodes: nodesCopy, edges: edgesCopy }
-  }, [baseNodes, baseEdges, layout, rankDir, layoutTick, visibleNodeCount])
+  }, [baseNodes, baseEdges, effectiveLayout, rankDir, layoutTick])
 
   const nodeById = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes])
 
