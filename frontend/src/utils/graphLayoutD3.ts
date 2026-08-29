@@ -7,6 +7,10 @@ import {
   forceSimulation,
 } from 'd3-force'
 import type { GraphElement } from '../types/graph'
+import {
+  buildBreadthFirstLayers,
+  orderLayersByBarycenter,
+} from './graphLayerOrdering'
 
 export interface LayoutNode {
   id: string
@@ -147,51 +151,14 @@ export function layoutBreadthFirst(
   nodeGap = BREADTH_FIRST_NODE_GAP,
   rankGap = BREADTH_FIRST_RANK_GAP,
 ): void {
-  const ids = new Set(nodes.map((n) => n.id))
   const nodeById = new Map(nodes.map((n) => [n.id, n]))
-  const adj = new Map<string, string[]>()
-  const indeg = new Map<string, number>()
-  for (const n of nodes) {
-    adj.set(n.id, [])
-    indeg.set(n.id, 0)
-  }
-  for (const e of edges) {
-    if (!ids.has(e.source) || !ids.has(e.target)) continue
-    adj.get(e.source)!.push(e.target)
-    indeg.set(e.target, (indeg.get(e.target) ?? 0) + 1)
-  }
-  const roots = nodes.filter((n) => indeg.get(n.id) === 0).map((n) => n.id)
-  const level = new Map<string, number>()
-  const q = [...roots]
-  for (const r of roots) level.set(r, 0)
-  while (q.length) {
-    const u = q.shift()!
-    const lv = level.get(u)!
-    for (const v of adj.get(u) ?? []) {
-      const nextLv = lv + 1
-      if (!level.has(v) || level.get(v)! < nextLv) {
-        level.set(v, nextLv)
-        q.push(v)
-      }
-    }
-  }
-  for (const n of nodes) {
-    if (!level.has(n.id)) level.set(n.id, 0)
-  }
-  const layers = new Map<number, string[]>()
-  for (const n of nodes) {
-    const l = level.get(n.id)!
-    if (!layers.has(l)) layers.set(l, [])
-    layers.get(l)!.push(n.id)
-  }
-  for (const arr of layers.values()) arr.sort()
-
-  const orderedLayers = [...layers.entries()].sort(([a], [b]) => a - b)
+  const baselineLayers = buildBreadthFirstLayers(nodes.map((node) => node.id), edges)
+  const orderedLayers = orderLayersByBarycenter(baselineLayers, edges)
   const rankBounds: Array<{ center: number; size: number }> = []
   let rankCenter = 0
   let previousRankSize = 0
 
-  orderedLayers.forEach(([, idsInLayer], layerIndex) => {
+  orderedLayers.forEach((idsInLayer, layerIndex) => {
     const layerNodes = idsInLayer.map((id) => nodeById.get(id)!)
     const rankSize = Math.max(
       ...layerNodes.map((node) => rankDir === 'TB' ? node.height : node.width),

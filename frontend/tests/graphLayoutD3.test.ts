@@ -31,6 +31,60 @@ function edge(source: string, target: string): LayoutEdge {
 }
 
 describe('layoutBreadthFirst', () => {
+  it('uses the same crossing-minimized logical order in top-down and left-right modes', () => {
+    const createNodes = () => [
+      node('parent-a', 185, 50),
+      node('parent-b', 270, 95),
+      node('a-child-for-b', 240, 120),
+      node('z-child-for-a', 195, 65),
+    ]
+    const edges = [
+      edge('parent-a', 'z-child-for-a'),
+      edge('parent-b', 'a-child-for-b'),
+    ]
+    const topDownNodes = createNodes()
+    const leftRightNodes = createNodes()
+
+    layoutBreadthFirst(topDownNodes, edges, 'TB')
+    layoutBreadthFirst(leftRightNodes, edges, 'LR')
+
+    const topDownChildOrder = topDownNodes
+      .filter((candidate) => candidate.id.includes('child'))
+      .sort((a, b) => a.x - b.x)
+      .map((candidate) => candidate.id)
+    const leftRightChildOrder = leftRightNodes
+      .filter((candidate) => candidate.id.includes('child'))
+      .sort((a, b) => a.y - b.y)
+      .map((candidate) => candidate.id)
+
+    expect(topDownChildOrder).toEqual(['z-child-for-a', 'a-child-for-b'])
+    expect(leftRightChildOrder).toEqual(topDownChildOrder)
+  })
+
+  it('preserves card-aware gaps after reordering mixed-width nodes', () => {
+    const nodes = [
+      node('parent-a', 185, 70),
+      node('parent-b', 270, 90),
+      node('a-child-for-b', 260, 110),
+      node('z-child-for-a', 190, 80),
+    ]
+    const edges = [
+      edge('parent-a', 'z-child-for-a'),
+      edge('parent-b', 'a-child-for-b'),
+    ]
+
+    layoutBreadthFirst(nodes, edges, 'TB')
+
+    const [leftChild, rightChild] = nodes
+      .filter((candidate) => candidate.id.includes('child'))
+      .sort((a, b) => a.x - b.x)
+    const horizontalGap = rightChild.x - rightChild.width / 2
+      - (leftChild.x + leftChild.width / 2)
+
+    expect([leftChild.id, rightChild.id]).toEqual(['z-child-for-a', 'a-child-for-b'])
+    expect(horizontalGap).toBeGreaterThanOrEqual(BREADTH_FIRST_NODE_GAP)
+  })
+
   it('uses mixed card widths and centers each top-down layer', () => {
     const nodes = [
       node('root', 210, 70),
