@@ -189,6 +189,37 @@ class GraphSplitter
             );
         }
 
+        // ── Queued-job tabs ─────────────────────────────────────────────────
+        // Dispatched jobs already exist as first-class graph nodes whose method is handle().
+        // Seed directly from those nodes so each tab starts at the queue boundary and follows
+        // the same forward lifecycle edges used by its originating route/command/channel.
+        foreach ($fullGraph->nodes() as $node) {
+            if ($node->type !== 'job' || ($node->data['method'] ?? null) !== 'handle') {
+                continue;
+            }
+
+            $fqcn = $node->data['fqcn'] ?? null;
+            if (! is_string($fqcn) || $fqcn === '') {
+                continue;
+            }
+
+            $tabId = $this->sanitizeId('job '.$fqcn);
+            $subgraph = $this->extractSubgraphForward($fullGraph, $fwdAdj, [$node->id], $projectName, $analyzedAt);
+            $subgraphs[$tabId] = $subgraph;
+
+            $file = $node->data['file'] ?? '';
+            $manifest[] = new TabManifestEntry(
+                id: $tabId,
+                label: $this->shortName($fqcn),
+                routeCount: 1,
+                nodeCount: $subgraph->nodeCount(),
+                edgeCount: $subgraph->edgeCount(),
+                file: ".graph-{$tabId}.json",
+                routeFile: $this->relativeRouteFile(is_string($file) ? $file : ''),
+                category: 'Job',
+            );
+        }
+
         // ── Filament resource tabs (one per page route, matching normal route behaviour) ──
         foreach ($filamentResources as $resource) {
             if (! empty($resource->pageRoutes)) {

@@ -167,7 +167,7 @@ class MethodTracer
                 visibility: $hop['visibility'],
             );
 
-            if (in_array($hop['type'], ['service', 'repository', 'action', 'mail', 'notification', 'abstract_class', 'resource'], true)) {
+            if (in_array($hop['type'], ['service', 'repository', 'action', 'job', 'mail', 'notification', 'abstract_class', 'resource'], true)) {
                 $subEdges = $this->traceDeep($hop['fqcn'], $hop['method'], depth: 1);
                 foreach ($subEdges as $sub) {
                     $edges[] = $sub;
@@ -237,7 +237,7 @@ class MethodTracer
                     );
 
                     // Recurse into non-leaf hops (services, repositories)
-                    if (in_array($hop['type'], ['service', 'repository', 'action', 'mail', 'notification', 'abstract_class', 'resource'], true)) {
+                    if (in_array($hop['type'], ['service', 'repository', 'action', 'job', 'mail', 'notification', 'abstract_class', 'resource'], true)) {
                         $subEdges = $this->traceDeep(
                             $hop['fqcn'],
                             $hop['method'],
@@ -306,7 +306,7 @@ class MethodTracer
 
         $discovered = $this->scanMethod(
             $methodAst,
-            $classInfo['deps'],
+            array_merge($classInfo['deps'], $classInfo['methodDeps'][$method] ?? []),
             $classInfo['useMap'],
             $fqcn,
             $classInfo['parent'] ?? null,
@@ -328,7 +328,7 @@ class MethodTracer
                 visibility: $hop['visibility'],
             );
 
-            if (in_array($hop['type'], ['service', 'repository', 'action', 'mail', 'notification', 'abstract_class', 'resource'], true)) {
+            if (in_array($hop['type'], ['service', 'repository', 'action', 'job', 'mail', 'notification', 'abstract_class', 'resource'], true)) {
                 $subEdges = $this->traceDeep($hop['fqcn'], $hop['method'], $depth + 1);
                 foreach ($subEdges as $sub) {
                     $edges[] = $sub;
@@ -1088,6 +1088,8 @@ class MethodTracer
         {
             public array $constructorDeps = []; // varName/prop => FQCN
 
+            public array $methodDeps = [];      // methodName => [varName => FQCN]
+
             public array $methods = [];          // methodName => ClassMethod
 
             public array $useMap = [];
@@ -1124,6 +1126,7 @@ class MethodTracer
                         $this->constructorDeps = $deps;
                     }
 
+                    $this->methodDeps[$name] = $deps;
                     $this->methods[$name] = $node;
 
                     // Collecting signatures does not need the body, and not descending stops a
@@ -1161,6 +1164,12 @@ class MethodTracer
         foreach ($visitor->constructorDeps as $var => $short) {
             $deps[$var] = $useMap[$short] ?? $short;
         }
+        $methodDeps = [];
+        foreach ($visitor->methodDeps as $methodName => $dependencies) {
+            foreach ($dependencies as $var => $short) {
+                $methodDeps[$methodName][$var] = $useMap[$short] ?? $short;
+            }
+        }
 
         $parentFqcn = PhpExtendsFqcnResolver::resolveExtends(
             $visitor->extendsNode,
@@ -1171,6 +1180,7 @@ class MethodTracer
         $result = [
             'methods' => $visitor->methods,
             'deps' => $deps,
+            'methodDeps' => $methodDeps,
             'useMap' => $useMap,
             'parent' => $parentFqcn,
         ];

@@ -1,9 +1,14 @@
 <?php
 
+use LaraMint\LaravelBrain\Analysis\ChannelAnalyzer;
+use LaraMint\LaravelBrain\Analysis\ChannelDefinition;
+use LaraMint\LaravelBrain\Analysis\ConsoleAnalyzer;
+use LaraMint\LaravelBrain\Analysis\ConsoleCommandDefinition;
 use LaraMint\LaravelBrain\Analysis\ModelAnalyzer;
 use LaraMint\LaravelBrain\Analysis\ModelDefinition;
 use LaraMint\LaravelBrain\Analysis\RouteAnalyzer;
 use LaraMint\LaravelBrain\Analysis\RouteDefinition;
+use LaraMint\LaravelBrain\Analysis\ScheduleEntry;
 use LaraMint\LaravelBrain\Graph\Edge;
 use LaraMint\LaravelBrain\Graph\Graph;
 use LaraMint\LaravelBrain\Graph\GraphSplitter;
@@ -14,6 +19,9 @@ use LaraMint\LaravelBrain\Graph\Node;
 class_exists(RouteAnalyzer::class);
 // ModelDefinition likewise lives in ModelAnalyzer.php.
 class_exists(ModelAnalyzer::class);
+// Console and channel definitions likewise share their analyzer files.
+class_exists(ConsoleAnalyzer::class);
+class_exists(ChannelAnalyzer::class);
 
 function splitterRouteNode(string $method, string $uri, ?array $security = null): Node
 {
@@ -199,4 +207,78 @@ it('lays the ERD out in the order the models are given', function () {
     };
 
     expect($ids($ordered))->not->toBe($ids($reversed));
+});
+
+it('adds job tabs without changing route command channel or schedule tabs', function () {
+    $graph = new Graph;
+    $graph->addNode(splitterRouteNode('GET', '/orders'));
+    $graph->addNode(new Node('action::App\\Http\\Controllers\\OrderController::index', 'action', 'OrderController@index'));
+    $graph->addNode(new Node('app_jobs_processorder::handle', 'job', 'ProcessOrder@handle', [
+        'fqcn' => 'App\\Jobs\\ProcessOrder',
+        'method' => 'handle',
+        'file' => '/app/Jobs/ProcessOrder.php',
+    ]));
+    $graph->addNode(new Node('app_services_orderworkflow::run', 'service', 'OrderWorkflow@run'));
+    $graph->addNode(new Node('model::App\\Models\\Order', 'model', 'Order'));
+    $graph->addNode(new Node('command::orders:sync', 'command', 'orders:sync'));
+    $graph->addNode(new Node('channel::'.md5('orders.{id}'), 'channel', 'orders.{id}'));
+    $graph->addNode(new Node('schedule::'.md5('commandorders:syncdaily'), 'schedule', 'orders:sync daily'));
+
+    foreach ([
+        ['action::App\\Http\\Controllers\\OrderController::index', 'app_jobs_processorder::handle'],
+        ['app_jobs_processorder::handle', 'app_services_orderworkflow::run'],
+        ['app_services_orderworkflow::run', 'model::App\\Models\\Order'],
+    ] as $i => [$source, $target]) {
+        $graph->addEdge(new Edge("job-e{$i}", $source, $target, 'calls', 'lifecycle'));
+    }
+
+    $route = new RouteDefinition(
+        method: 'GET',
+        uri: '/orders',
+        controller: 'App\\Http\\Controllers\\OrderController',
+        action: 'index',
+        middlewares: [],
+        name: '',
+        file: '/app/routes/web.php',
+        line: 1,
+        tabGroup: 'GET /orders',
+    );
+    $command = new ConsoleCommandDefinition('orders:sync', '', '', '/app/Console/OrdersSync.php', 'class');
+    $channel = new ChannelDefinition('orders.{id}', '', '/app/routes/channels.php');
+    $schedule = new ScheduleEntry('command', 'orders:sync', 'daily', '/app/routes/console.php');
+
+    $split = (new GraphSplitter)->split(
+        $graph,
+        [$route],
+        [$command],
+        [$channel],
+        [$schedule],
+        'proj',
+        '2026-08-29T00:00:00Z',
+    );
+
+    $tabs = [];
+    foreach ($split['manifest'] as $entry) {
+        $tabs[$entry->category] = $entry;
+    }
+
+    expect($tabs)->toHaveKeys(['Route', 'Command', 'Channel', 'Schedule', 'Job'])
+        ->and($tabs['Route']->label)->toBe('GET /orders')
+        ->and($tabs['Command']->label)->toBe('orders:sync')
+        ->and($tabs['Channel']->label)->toBe('orders.{id}')
+        ->and($tabs['Schedule']->label)->toBe('Scheduled Tasks')
+        ->and($tabs['Job']->label)->toBe('ProcessOrder');
+
+    $jobNodeIds = array_map(static fn (Node $node): string => $node->id, $split['subgraphs'][$tabs['Job']->id]->nodes());
+    $routeNodeIds = array_map(static fn (Node $node): string => $node->id, $split['subgraphs'][$tabs['Route']->id]->nodes());
+
+    expect($jobNodeIds)->toBe([
+        'app_jobs_processorder::handle',
+        'app_services_orderworkflow::run',
+        'model::App\\Models\\Order',
+    ])->and($routeNodeIds)->toContain(
+        'app_jobs_processorder::handle',
+        'app_services_orderworkflow::run',
+        'model::App\\Models\\Order',
+    );
 });

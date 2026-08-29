@@ -225,6 +225,7 @@ const CATEGORY_ICONS: Record<string, IconKey> = {
   'Console Commands': 'terminal',
   'Broadcast Channels': 'broadcast',
   Schedules: 'clock',
+  Jobs: 'box',
   'Model ERD': 'box',
   Other: 'route',
 }
@@ -244,6 +245,7 @@ function categoryBucket(tab: TabEntry): string {
   if (tab.category === 'Command') return 'Console Commands'
   if (tab.category === 'Channel') return 'Broadcast Channels'
   if (tab.category === 'Schedule') return 'Schedules'
+  if (tab.category === 'Job') return 'Jobs'
   if (tab.category === 'ERD') return 'Model ERD'
   if (tab.category === 'Filament') {
     const p = tab.panelId ?? ''
