@@ -29,6 +29,18 @@ import {
   pickLayoutKind,
   splitNodeLabel,
 } from '../utils/graphLayoutD3'
+import {
+  backgroundGesture,
+  clearSelection as emptySelection,
+  incidentEdgeIds,
+  moveNodePositions,
+  nodesIntersectingMarquee,
+  prepareNodeDrag,
+  retainVisibleSelection,
+  selectNode,
+  type Point,
+  type SelectionState,
+} from '../utils/graphSelection'
 
 // ── Geometry ───────────────────────────────────────────────────────────────
 
@@ -59,6 +71,15 @@ interface Spark {
   decay: number
   size: number
   color: string
+}
+
+interface MarqueeState {
+  start: Point
+  end: Point
+}
+
+function sameIds(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
+  return left.size === right.size && [...left].every((id) => right.has(id))
 }
 
 function hex2(n: number) {
@@ -225,7 +246,6 @@ function cardColors(
   n: LayoutNode,
   dark: boolean,
   complexityOverlay: boolean,
-  selected: boolean,
   stN: boolean,
   securityOverlay: boolean,
 ): { bg: string; border: string; borderW: number; accent: string } {
@@ -252,15 +272,14 @@ function cardColors(
       const exposureMap = dark ? SECURITY_EXPOSURE_COLORS : SECURITY_EXPOSURE_COLORS_LIGHT
       const palette = exposureMap[sec.exposure] ?? exposureMap['public']
       const riskColor = SECURITY_RISK_COLORS[sec.riskLevel] ?? SECURITY_RISK_COLORS['none']
-      const border = selected ? accent : stN ? '#a855f7' : sec.riskLevel !== 'none' ? riskColor : palette.border
-      return { bg: palette.bg, border, borderW: selected || sec.riskLevel !== 'none' ? 2 : 1.5, accent: palette.accent }
+      const border = stN ? '#a855f7' : sec.riskLevel !== 'none' ? riskColor : palette.border
+      return { bg: palette.bg, border, borderW: sec.riskLevel !== 'none' ? 2 : 1.5, accent: palette.accent }
     }
   }
 
   let border = dark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.12)'
   let borderW = 1
   if (n.data.hasN1) { border = '#F44336'; borderW = 2 }
-  if (selected) { border = accent; borderW = 2 }
   if (stN) { border = '#a855f7'; borderW = 2 }
 
   return { bg, border, borderW, accent }
@@ -365,11 +384,11 @@ export function GraphView({
   // ── Per-node drag overrides ────────────────────────────────────────────────
   const [draggedPositions, setDraggedPositions] = useState<Map<string, { x: number; y: number }>>(new Map())
   const dragStateRef = useRef<{
-    nodeId: string
+    anchorNodeId: string
     startSX: number
     startSY: number
-    origMX: number
-    origMY: number
+    scale: number
+    originalPositions: Map<string, Point>
   } | null>(null)
   const isDraggingRef = useRef(false)
 
@@ -521,50 +540,127 @@ export function GraphView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stressTestNodeId, stressRunKey, edges, edgeVisible, nodeById])
 
-  const [highlightEdgeIds, setHighlightEdgeIds] = useState<Set<string>>(new Set())
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
-  const tapNode = useCallback(
-    (id: string) => {
-      const next = new Set<string>()
-      for (const e of edges) {
-        if (e.source === id || e.target === id) next.add(e.id)
-      }
-      setHighlightEdgeIds(next)
-      setSelectedNodeId(id)
-      onNodeSelect(id)
-    },
-    [edges, onNodeSelect],
+  const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(new Set())
+  const [primarySelectedNodeId, setPrimarySelectedNodeId] = useState<string | null>(null)
+  const [marquee, setMarquee] = useState<MarqueeState | null>(null)
+  const marqueeRef = useRef<MarqueeState | null>(null)
+  const suppressBackgroundClickRef = useRef(false)
+
+  const selectableNodeIds = useMemo(
+    () => new Set(
+      effectiveNodes
+        .filter((node) => isTypeVisible(node.data.type) && !hiddenNodeIds.has(node.id))
+        .map((node) => node.id),
+    ),
+    [effectiveNodes, hiddenNodeIds, isTypeVisible],
   )
 
-  const tapBg = useCallback(() => {
-    setHighlightEdgeIds(new Set())
-    setSelectedNodeId(null)
-    onNodeSelect(null)
+  // Reconcile render-owned selection immediately when filtering, collapse, or
+  // a graph replacement removes nodes. This avoids one frame of stale IDs.
+  const [previousSelectableNodeIds, setPreviousSelectableNodeIds] = useState(selectableNodeIds)
+  if (!sameIds(previousSelectableNodeIds, selectableNodeIds)) {
+    setPreviousSelectableNodeIds(selectableNodeIds)
+    const next = retainVisibleSelection({
+      selectedIds: selectedNodeIds,
+      primaryId: primarySelectedNodeId,
+    }, selectableNodeIds)
+    if (!sameIds(next.selectedIds, selectedNodeIds)) setSelectedNodeIds(next.selectedIds)
+    if (next.primaryId !== primarySelectedNodeId) setPrimarySelectedNodeId(next.primaryId)
+  }
+
+  const notifiedPrimaryRef = useRef<string | null>(null)
+
+  const commitSelection = useCallback((next: SelectionState) => {
+    setSelectedNodeIds(next.selectedIds)
+    setPrimarySelectedNodeId(next.primaryId)
+    notifiedPrimaryRef.current = next.primaryId
+    onNodeSelect(next.primaryId)
   }, [onNodeSelect])
+
+  const tapNode = useCallback(
+    (id: string, additive: boolean) => {
+      commitSelection(selectNode({
+        selectedIds: selectedNodeIds,
+        primaryId: primarySelectedNodeId,
+      }, id, additive))
+    },
+    [commitSelection, primarySelectedNodeId, selectedNodeIds],
+  )
+
+  const tapBg = useCallback((event: React.MouseEvent<SVGRectElement>) => {
+    if (event.shiftKey) return
+    if (suppressBackgroundClickRef.current) return
+    commitSelection(emptySelection())
+  }, [commitSelection])
+
+  useEffect(() => {
+    if (notifiedPrimaryRef.current === primarySelectedNodeId) return
+    notifiedPrimaryRef.current = primarySelectedNodeId
+    onNodeSelect(primarySelectedNodeId)
+  }, [onNodeSelect, primarySelectedNodeId])
+
+  const highlightEdgeIds = useMemo(() => incidentEdgeIds(
+    edges.filter((edge) =>
+      edgeVisible(edge) &&
+      !collapsedNodes.has(edge.source) &&
+      !hiddenNodeIds.has(edge.source) &&
+      !hiddenNodeIds.has(edge.target),
+    ),
+    selectedNodeIds,
+  ), [collapsedNodes, edgeVisible, edges, hiddenNodeIds, selectedNodeIds])
 
   // ── Node drag handlers ─────────────────────────────────────────────────────
   const handleNodePointerDown = useCallback(
-    (e: React.PointerEvent<SVGGElement>, nodeId: string, mx: number, my: number) => {
+    (e: React.PointerEvent<SVGGElement>, nodeId: string) => {
+      if (e.button !== 0) return
       e.stopPropagation()
       ;(e.currentTarget as SVGGElement).setPointerCapture(e.pointerId)
       isDraggingRef.current = false
-      dragStateRef.current = { nodeId, startSX: e.clientX, startSY: e.clientY, origMX: mx, origMY: my }
+
+      const currentSelection = {
+        selectedIds: selectedNodeIds,
+        primaryId: primarySelectedNodeId,
+      }
+      const prepared = prepareNodeDrag(currentSelection, nodeId, e.shiftKey)
+      if (
+        !sameIds(prepared.selection.selectedIds, selectedNodeIds) ||
+        prepared.selection.primaryId !== primarySelectedNodeId
+      ) {
+        commitSelection(prepared.selection)
+      }
+
+      const originalPositions = new Map<string, Point>()
+      for (const id of prepared.draggedIds) {
+        const node = effectiveNodeById.get(id)
+        if (node) originalPositions.set(id, { x: node.x, y: node.y })
+      }
+      dragStateRef.current = {
+        anchorNodeId: nodeId,
+        startSX: e.clientX,
+        startSY: e.clientY,
+        scale: transformRef.current.k,
+        originalPositions,
+      }
     },
-    [],
+    [commitSelection, effectiveNodeById, primarySelectedNodeId, selectedNodeIds],
   )
 
   const handleNodePointerMove = useCallback(
     (e: React.PointerEvent<SVGGElement>, nodeId: string) => {
       const ds = dragStateRef.current
-      if (!ds || ds.nodeId !== nodeId) return
+      if (!ds || ds.anchorNodeId !== nodeId) return
       const dx = e.clientX - ds.startSX
       const dy = e.clientY - ds.startSY
       if (!isDraggingRef.current && Math.abs(dx) < 4 && Math.abs(dy) < 4) return
       isDraggingRef.current = true
-      const k = transformRef.current.k
+      const movedPositions = moveNodePositions(
+        ds.originalPositions,
+        dx / ds.scale,
+        dy / ds.scale,
+      )
       setDraggedPositions((prev) => {
         const next = new Map(prev)
-        next.set(nodeId, { x: ds.origMX + dx / k, y: ds.origMY + dy / k })
+        for (const [id, point] of movedPositions) next.set(id, point)
         return next
       })
     },
@@ -572,7 +668,11 @@ export function GraphView({
   )
 
   const handleNodePointerUp = useCallback((_e: React.PointerEvent<SVGGElement>, nodeId: string) => {
-    if (dragStateRef.current?.nodeId === nodeId) dragStateRef.current = null
+    if (dragStateRef.current?.anchorNodeId === nodeId) dragStateRef.current = null
+  }, [])
+
+  const handleNodePointerCancel = useCallback((_e: React.PointerEvent<SVGGElement>, nodeId: string) => {
+    if (dragStateRef.current?.anchorNodeId === nodeId) dragStateRef.current = null
   }, [])
 
   /** Packet animation */
@@ -588,6 +688,85 @@ export function GraphView({
   const zoomBehaviorRef = useRef<ZoomBehavior<SVGSVGElement, unknown> | null>(null)
   const [zoomPct, setZoomPct] = useState(100)
   const [showEdgeLabels, setShowEdgeLabels] = useState(true)
+
+  const pointerPosition = useCallback((clientX: number, clientY: number): Point | null => {
+    const bounds = svgRef.current?.getBoundingClientRect()
+    if (!bounds) return null
+    return { x: clientX - bounds.left, y: clientY - bounds.top }
+  }, [])
+
+  const handleBackgroundPointerDown = useCallback((e: React.PointerEvent<SVGRectElement>) => {
+    if (backgroundGesture(e.button, e.shiftKey) !== 'marquee') return
+    const point = pointerPosition(e.clientX, e.clientY)
+    if (!point) return
+
+    e.preventDefault()
+    e.stopPropagation()
+    e.currentTarget.setPointerCapture(e.pointerId)
+    const next = { start: point, end: point }
+    marqueeRef.current = next
+    setMarquee(next)
+  }, [pointerPosition])
+
+  const handleBackgroundPointerMove = useCallback((e: React.PointerEvent<SVGRectElement>) => {
+    const current = marqueeRef.current
+    if (!current) return
+    const point = pointerPosition(e.clientX, e.clientY)
+    if (!point) return
+
+    e.preventDefault()
+    e.stopPropagation()
+    const next = { ...current, end: point }
+    marqueeRef.current = next
+    setMarquee(next)
+  }, [pointerPosition])
+
+  const finishMarquee = useCallback((e: React.PointerEvent<SVGRectElement>, cancelled = false) => {
+    const current = marqueeRef.current
+    if (!current) return
+
+    e.preventDefault()
+    e.stopPropagation()
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId)
+    }
+    marqueeRef.current = null
+    setMarquee(null)
+    suppressBackgroundClickRef.current = true
+    window.setTimeout(() => { suppressBackgroundClickRef.current = false }, 200)
+    if (cancelled) return
+
+    const transform = transformRef.current
+    const intersectingIds = nodesIntersectingMarquee(
+      effectiveNodes,
+      selectableNodeIds,
+      current.start,
+      current.end,
+      { x: transform.x, y: transform.y, k: transform.k },
+    )
+    if (intersectingIds.size === 0) return
+
+    const selectedIds = new Set(selectedNodeIds)
+    let primaryId = primarySelectedNodeId
+    for (const id of intersectingIds) {
+      selectedIds.add(id)
+      primaryId = id
+    }
+    commitSelection({ selectedIds, primaryId })
+  }, [commitSelection, effectiveNodes, primarySelectedNodeId, selectableNodeIds, selectedNodeIds])
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      if (dragStateRef.current) isDraggingRef.current = true
+      dragStateRef.current = null
+      marqueeRef.current = null
+      setMarquee(null)
+      commitSelection(emptySelection())
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [commitSelection])
 
   const spawnPacket = useCallback(
     (edgeId: string, color: string, delay = 0, chained = false) => {
@@ -915,7 +1094,13 @@ export function GraphView({
 
     const zr = zoom<SVGSVGElement, unknown>()
       .scaleExtent([0.02, 5])
-      .filter((ev) => !dragStateRef.current && (!ev.ctrlKey || ev.type === 'wheel') && !ev.button)
+      .filter((ev) =>
+        !dragStateRef.current &&
+        !marqueeRef.current &&
+        !(ev.shiftKey && ev.type !== 'wheel') &&
+        (!ev.ctrlKey || ev.type === 'wheel') &&
+        !ev.button,
+      )
       .on('zoom', (ev) => {
         transformRef.current = ev.transform
         select(g).attr('transform', ev.transform.toString())
@@ -1061,6 +1246,10 @@ export function GraphView({
             height={200000}
             fill="transparent"
             onClick={tapBg}
+            onPointerDown={handleBackgroundPointerDown}
+            onPointerMove={handleBackgroundPointerMove}
+            onPointerUp={(event) => finishMarquee(event)}
+            onPointerCancel={(event) => finishMarquee(event, true)}
             style={{ pointerEvents: 'all' }}
           />
           {edges.map((e) => {
@@ -1139,8 +1328,9 @@ export function GraphView({
             const nodeDim = searchMatch && !searchMatch.has(n.id)
             const opacity = !typeOk ? 0 : nodeDim ? 0.07 : 1
             const stN = stressSets.nodes.has(n.id)
-            const selected = selectedNodeId === n.id
-            const { bg, border, borderW, accent } = cardColors(n, dark, complexityOverlay, selected, stN, securityOverlay)
+            const selected = selectedNodeIds.has(n.id)
+            const primarySelected = primarySelectedNodeId === n.id
+            const { bg, border, borderW, accent } = cardColors(n, dark, complexityOverlay, stN, securityOverlay)
 
             const rawLabel = String(n.data.label ?? n.id)
             const { className, method } = splitNodeLabel(rawLabel, n.data.method as string | undefined)
@@ -1174,15 +1364,27 @@ export function GraphView({
                 transform={`translate(${n.x},${n.y})`}
                 opacity={opacity}
                 style={{ pointerEvents: typeOk && opacity > 0.05 ? 'auto' : 'none', cursor: 'grab' }}
-                onPointerDown={(ev) => handleNodePointerDown(ev, n.id, n.x, n.y)}
+                data-selected={selected || undefined}
+                data-primary-selected={primarySelected || undefined}
+                onPointerDown={(ev) => handleNodePointerDown(ev, n.id)}
                 onPointerMove={(ev) => handleNodePointerMove(ev, n.id)}
                 onPointerUp={(ev) => handleNodePointerUp(ev, n.id)}
-                onClick={(ev) => { ev.stopPropagation(); if (!isDraggingRef.current) tapNode(n.id) }}
+                onPointerCancel={(ev) => handleNodePointerCancel(ev, n.id)}
+                onClick={(ev) => {
+                  ev.stopPropagation()
+                  if (!isDraggingRef.current) tapNode(n.id, ev.shiftKey)
+                }}
               >
-                {/* Glow ring when selected */}
+                {/* Consistent selection outline, independent of node type/risk colours. */}
                 {selected && (
-                  <rect x={-hw - 3} y={-hh - 3} width={w + 6} height={h + 6}
-                    rx={compact ? 7 : 13} fill="none" stroke={accent} strokeWidth={6} opacity={0.15} />
+                  <>
+                    <rect x={-hw - 4} y={-hh - 4} width={w + 8} height={h + 8}
+                      rx={compact ? 8 : 14} fill="none" stroke={HIGHLIGHT_COLOR}
+                      strokeWidth={primarySelected ? 8 : 6} opacity={0.18} />
+                    <rect x={-hw - 3} y={-hh - 3} width={w + 6} height={h + 6}
+                      rx={compact ? 7 : 13} fill="none" stroke={HIGHLIGHT_COLOR}
+                      strokeWidth={primarySelected ? 3 : 2} opacity={0.95} />
+                  </>
                 )}
 
                 {/* Card background */}
@@ -1330,6 +1532,18 @@ export function GraphView({
           })}
         </g>
       </svg>
+
+      {marquee && (
+        <div
+          className="g-selection-marquee"
+          style={{
+            left: Math.min(marquee.start.x, marquee.end.x),
+            top: Math.min(marquee.start.y, marquee.end.y),
+            width: Math.abs(marquee.end.x - marquee.start.x),
+            height: Math.abs(marquee.end.y - marquee.start.y),
+          }}
+        />
+      )}
 
       <canvas
         ref={canvasRef}

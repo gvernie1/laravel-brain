@@ -3828,6 +3828,15 @@ kbd, .toolbar-kbd, .stat-chip, .route-row-uri, .route-row-method,
 
 /* ── Graph canvas overlays ───────────────────────────────── */
 .g-canvas.g-no-edge-labels .g-edge-label { display: none; }
+.g-selection-marquee {
+  position: absolute;
+  z-index: 3;
+  pointer-events: none;
+  border: 1px solid color-mix(in srgb, var(--accent) 78%, white 22%);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 14%, transparent);
+}
 .g-rails {
   position: absolute;
   left: 14px;
