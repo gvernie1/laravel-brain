@@ -19,6 +19,24 @@ class Graph
 
     public function addNode(Node $node): void
     {
+        $existing = $this->nodes[$node->id] ?? null;
+        if ($existing !== null) {
+            if ($existing->type === $node->type
+                && $existing->label === $node->label
+                && $existing->data === $node->data) {
+                return;
+            }
+
+            throw new \LogicException(sprintf(
+                'Contradictory graph node identity for "%s": existing %s/%s, incoming %s/%s.',
+                $node->id,
+                $existing->type,
+                $existing->label,
+                $node->type,
+                $node->label,
+            ));
+        }
+
         $this->nodes[$node->id] = $node;
     }
 

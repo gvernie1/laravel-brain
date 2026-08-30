@@ -22,6 +22,10 @@ class ConsoleCommandDefinition
         public string $declaredSignature = '',
         public string $sourceScope = 'application',
         public ?int $line = null,
+        /** Internal AST only; GraphBuilder never exports parser nodes. */
+        public Node\Expr\Closure|Node\Expr\ArrowFunction|null $closureNode = null,
+        /** @var array<string,string> */
+        public array $closureUseMap = [],
     ) {
         $this->declaredSignature = $this->declaredSignature !== '' ? $this->declaredSignature : $this->signature;
         $this->canonicalName = $this->canonicalName !== ''
@@ -54,6 +58,10 @@ class ScheduleEntry
         public string $targetResolution = 'unresolved',
         public ?string $targetClass = null,
         public string $sourceScope = 'unknown',
+        /** Internal AST only; GraphBuilder never exports parser nodes. */
+        public Node\Expr\Closure|Node\Expr\ArrowFunction|null $closureNode = null,
+        /** @var array<string,string> */
+        public array $closureUseMap = [],
     ) {
         $this->rawInvocation = $this->rawInvocation !== '' ? $this->rawInvocation : $this->target;
         $this->canonicalTarget = $this->canonicalTarget !== ''
@@ -230,13 +238,14 @@ class ConsoleAnalyzer
         $schedule = [];
 
         $traverser = new NodeTraverser;
-        $visitor = new class($file) extends NodeVisitorAbstract
+        $visitor = new class($file, $parsed['useMap'] ?? []) extends NodeVisitorAbstract
         {
             public array $commands = [];
 
             public array $schedule = [];
 
-            public function __construct(private string $file) {}
+            /** @param array<string,string> $useMap */
+            public function __construct(private string $file, private array $useMap) {}
 
             public function enterNode(Node $node): ?int
             {
@@ -254,6 +263,7 @@ class ConsoleAnalyzer
                 if ($class === 'Illuminate\\Support\\Facades\\Artisan' && $method === 'command') {
                     $sig = $this->strArg($node->args[0] ?? null);
                     if ($sig !== null) {
+                        $closure = $node->args[1]->value ?? null;
                         $this->commands[] = new ConsoleCommandDefinition(
                             signature: $sig,
                             description: '',
@@ -261,6 +271,10 @@ class ConsoleAnalyzer
                             file: $this->file,
                             source: 'route',
                             line: $node->getStartLine(),
+                            closureNode: $closure instanceof Node\Expr\Closure || $closure instanceof Node\Expr\ArrowFunction
+                                ? $closure
+                                : null,
+                            closureUseMap: $this->useMap,
                         );
                     }
                 }
@@ -598,6 +612,7 @@ class ConsoleAnalyzer
         $targetArguments = [];
         $invocationArguments = [];
         $invocationOptions = [];
+        $closureNode = null;
 
         if ($rootMethod === 'command') {
             $first = $rootArgs[0]->value ?? null;
@@ -633,6 +648,11 @@ class ConsoleAnalyzer
             }
             $rawInvocation = $this->prettyExpression($rootArgs[0]->value);
             $canonicalTarget = $target;
+        } elseif ($rootMethod === 'call') {
+            $candidate = $rootArgs[0]->value ?? null;
+            if ($candidate instanceof Node\Expr\Closure || $candidate instanceof Node\Expr\ArrowFunction) {
+                $closureNode = $candidate;
+            }
         }
 
         $cronExpression = $frequency === 'cron' && is_string($cadenceArguments[0] ?? null)
@@ -653,6 +673,8 @@ class ConsoleAnalyzer
             invocationOptions: $invocationOptions,
             targetArguments: $targetArguments,
             line: $rootLine,
+            closureNode: $closureNode,
+            closureUseMap: $useMap,
         );
     }
 

@@ -29,12 +29,19 @@ class CallChainEdge
         public ?string $declaringFqcn = null,
         /** Semantic kind of the declaring artifact (service, controller, form_request, framework, exception, …). */
         public string $ownerKind = '',
-        /** 'application' | 'framework' | 'vendor' | 'runtime' | 'unknown'. */
+        /** Declaration scope, retained as the backward-compatible sourceScope contract. */
         public string $sourceScope = '',
         /** More precise additive classification while the broad edge type remains compatible. */
         public string $subtype = '',
+        /** 'application' | 'framework' | 'vendor' | 'runtime' | 'unknown'. */
+        public string $receiverScope = '',
+        /** 'application' | 'framework' | 'vendor' | 'runtime' | 'unknown'. */
+        public string $declaringScope = '',
+        public ?string $receiverFile = null,
+        public ?string $declaringFile = null,
     ) {
         $this->receiverFqcn ??= $this->calleeFqcn;
-        $this->declaringFqcn ??= $this->calleeFqcn;
+        $this->declaringScope = $this->declaringScope !== '' ? $this->declaringScope : $this->sourceScope;
+        $this->sourceScope = $this->sourceScope !== '' ? $this->sourceScope : $this->declaringScope;
     }
 }

@@ -1,7 +1,10 @@
 <?php
 
+use LaraMint\LaravelBrain\Analysis\ControllerAnalyzer;
 use LaraMint\LaravelBrain\Analysis\MethodTracer;
 use LaraMint\LaravelBrain\Analysis\MiddlewareRegistry;
+use LaraMint\LaravelBrain\Analysis\RouteAnalyzer;
+use LaraMint\LaravelBrain\Analysis\RouteDefinition;
 use LaraMint\LaravelBrain\Graph\GraphBuilder;
 
 function resourceEdges(string $fqcn, string $method): array
@@ -98,8 +101,22 @@ it('does not treat a Filament resource as an API resource', function () {
 
 it('wires action → resource and resource → resource edges into the graph', function () use ($UserApi, $UserResource, $OrderResource) {
     $edges = resourceEdges($UserApi, 'show');
+    $project = fixture('laravel-project');
+    new RouteAnalyzer; // Loads the colocated route DTO used by the analyzer.
+    $routes = [new RouteDefinition(
+        method: 'GET',
+        uri: '/resource-users/{id}',
+        controller: $UserApi,
+        action: 'show',
+        middlewares: [],
+        name: '',
+        file: $project.'/routes/api.php',
+        line: 1,
+        tabGroup: 'GET /resource-users/{id}',
+    )];
+    $controllers = (new ControllerAnalyzer)->analyze($project, $routes);
 
-    $graph = (new GraphBuilder)->build('test', [], new MiddlewareRegistry([], [], []), [], $edges, []);
+    $graph = (new GraphBuilder)->build('test', $routes, new MiddlewareRegistry([], [], []), $controllers, $edges, [], $project);
 
     $resourceNodes = array_filter($graph->nodes(), fn ($n) => $n->type === 'resource');
     expect($resourceNodes)->not->toBeEmpty();

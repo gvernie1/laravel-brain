@@ -349,7 +349,29 @@ class ProjectAnalyzer
             if ($cmd->class) {
                 $edges = $this->methodTracer->traceMethod($cmd->class, 'handle', $psr4Map, $projectRoot);
                 $commandEdges = array_merge($commandEdges, $edges);
+            } elseif ($cmd->closureNode !== null) {
+                $edges = $this->methodTracer->traceClosure(
+                    $cmd->closureNode,
+                    $cmd->closureUseMap,
+                    'command::'.$cmd->canonicalName,
+                    $psr4Map,
+                    $projectRoot,
+                );
+                $commandEdges = array_merge($commandEdges, $edges);
             }
+        }
+        foreach ($schedules as $schedule) {
+            if ($schedule->type !== 'call' || $schedule->closureNode === null) {
+                continue;
+            }
+            $edges = $this->methodTracer->traceClosure(
+                $schedule->closureNode,
+                $schedule->closureUseMap,
+                $schedule->graphId(),
+                $psr4Map,
+                $projectRoot,
+            );
+            $commandEdges = array_merge($commandEdges, $edges);
         }
         $scheduledJobClasses = [];
         foreach ($schedules as $schedule) {

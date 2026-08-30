@@ -42,7 +42,7 @@ it('applies Laravel 11 global middleware to every route in graph and security an
     $guardedByAuthenticate = array_values(array_filter(
         $graph->edges(),
         static fn ($edge): bool => $edge->type === 'route-to-middleware'
-            && $edge->target === 'middleware::Illuminate\\Auth\\Middleware\\Authenticate',
+            && $edge->target === 'middleware::class::Illuminate\\Auth\\Middleware\\Authenticate',
     ));
     $accountMiddleware = array_values(array_map(
         static fn ($edge): string => $edge->target,
@@ -56,13 +56,13 @@ it('applies Laravel 11 global middleware to every route in graph and security an
     expect($routeNodes)->toHaveCount(2)
         ->and($guardedByAuthenticate)->toHaveCount(2)
         ->and($accountMiddleware)->toBe([
-            'middleware::App\\Http\\Middleware\\BeforeOne',
-            'middleware::App\\Http\\Middleware\\BeforeTwo',
-            'middleware::App\\Http\\Middleware\\BeforeAll',
-            'middleware::Illuminate\\Auth\\Middleware\\Authenticate',
-            'middleware::App\\Http\\Middleware\\AfterOne',
-            'middleware::App\\Http\\Middleware\\AfterTwo',
-            'middleware::route-specific',
+            'middleware::class::App\\Http\\Middleware\\BeforeOne',
+            'middleware::class::App\\Http\\Middleware\\BeforeTwo',
+            'middleware::class::App\\Http\\Middleware\\BeforeAll',
+            'middleware::class::Illuminate\\Auth\\Middleware\\Authenticate',
+            'middleware::class::App\\Http\\Middleware\\AfterOne',
+            'middleware::class::App\\Http\\Middleware\\AfterTwo',
+            'middleware::alias::route-specific',
         ]);
 
     foreach ($routeNodes as $routeNode) {

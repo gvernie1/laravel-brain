@@ -149,6 +149,7 @@ class MethodTracer
         string $projectRoot = ''
     ): array {
         $this->initializeContext($psr4Map, $projectRoot);
+        $this->visited = [];
 
         $discovered = $this->scanMethod($closure, [], $useMap, $callerFqcn, null);
 
@@ -323,13 +324,14 @@ class MethodTracer
      */
     private function edgeForHop(string $callerFqcn, string $callerMethod, array $hop): CallChainEdge
     {
-        $ownership = $this->methodOwnership($hop['fqcn'], $hop['method'], $hop['type']);
+        $calleeMethod = $this->resolvedLifecycleMethod($hop['fqcn'], $hop['method'], $hop['type']);
+        $ownership = $this->methodOwnership($hop['fqcn'], $calleeMethod, $hop['type']);
 
         return new CallChainEdge(
             callerFqcn: $callerFqcn,
             callerMethod: $callerMethod,
             calleeFqcn: $hop['fqcn'],
-            calleeMethod: $hop['method'],
+            calleeMethod: $calleeMethod,
             type: $hop['type'],
             visibility: $hop['visibility'],
             receiverFqcn: $hop['fqcn'],
@@ -337,30 +339,73 @@ class MethodTracer
             ownerKind: $ownership['ownerKind'],
             sourceScope: $ownership['sourceScope'],
             subtype: $ownership['subtype'],
+            receiverScope: $ownership['receiverScope'],
+            declaringScope: $ownership['declaringScope'],
+            receiverFile: $ownership['receiverFile'],
+            declaringFile: $ownership['declaringFile'],
         );
+    }
+
+    private function resolvedLifecycleMethod(string $fqcn, string $requested, string $type): string
+    {
+        if (! in_array($type, ['mail', 'notification'], true)) {
+            return $requested;
+        }
+
+        $classInfo = $this->loadClass($fqcn);
+
+        return $classInfo !== null
+            ? $this->fallbackEntryMethod($fqcn, $requested, $classInfo['methods'])
+            : $requested;
     }
 
     /**
      * Resolve a call-site receiver separately from the method declaration it reaches.
      *
-     * @return array{declaringFqcn:string,ownerKind:string,sourceScope:string,subtype:string}
+     * `sourceScope` is intentionally the declaration scope for backward compatibility.
+     *
+     * @return array{declaringFqcn:?string,ownerKind:string,sourceScope:string,subtype:string,receiverScope:string,declaringScope:string,receiverFile:?string,declaringFile:?string}
      */
     private function methodOwnership(string $receiverFqcn, string $method, string $traceType): array
     {
-        $declaringFqcn = $this->declaringFqcnForMethod($receiverFqcn, $method) ?? $receiverFqcn;
-        $sourceScope = $this->sourceScopeFor($declaringFqcn);
+        $declaringFqcn = $this->declaringFqcnForMethod($receiverFqcn, $method);
+        $receiverFile = $this->resolveFile($receiverFqcn);
+        $declaringFile = $declaringFqcn !== null ? $this->resolveFile($declaringFqcn) : null;
+        $receiverScope = SourceProvenance::scope($receiverFqcn, $receiverFile, $this->projectRoot);
+        $declaringScope = $declaringFqcn !== null
+            ? SourceProvenance::scope($declaringFqcn, $declaringFile, $this->projectRoot)
+            : 'unknown';
+        $sourceScope = $declaringScope;
         $isException = $this->isThrowableType($receiverFqcn);
         $isFormRequest = $this->isFormRequestType($receiverFqcn);
 
         if ($isException) {
             $ownerKind = 'exception';
             $subtype = $method === '__construct' ? 'exception_constructor' : 'exception_method';
-        } elseif ($sourceScope === 'framework') {
+        } elseif ($traceType === 'model') {
+            $ownerKind = 'model';
+            $subtype = 'eloquent_operation';
+        } elseif (in_array($traceType, ['job', 'event', 'listener', 'mail', 'notification', 'interface', 'abstract_class', 'resource'], true)) {
+            $ownerKind = $traceType;
+            $subtype = $traceType;
+        } elseif ($declaringScope === 'framework') {
             $ownerKind = 'framework';
             $subtype = 'framework_method';
-        } elseif ($sourceScope === 'vendor') {
+        } elseif ($declaringScope === 'vendor') {
             $ownerKind = 'package';
             $subtype = 'vendor_method';
+        } elseif ($declaringScope === 'runtime') {
+            $ownerKind = 'runtime';
+            $subtype = 'runtime_method';
+        } elseif ($declaringScope === 'unknown' && $receiverScope === 'framework') {
+            $ownerKind = 'framework';
+            $subtype = 'framework_method';
+        } elseif ($declaringScope === 'unknown' && $receiverScope === 'vendor') {
+            $ownerKind = 'package';
+            $subtype = 'vendor_method';
+        } elseif ($declaringScope === 'unknown' && $receiverScope === 'runtime') {
+            $ownerKind = 'runtime';
+            $subtype = 'runtime_method';
         } elseif ($isFormRequest) {
             $ownerKind = 'form_request';
             $subtype = 'form_request_method';
@@ -373,10 +418,19 @@ class MethodTracer
                 'abstract_class' => 'abstract_class',
                 default => $traceType,
             };
-            $subtype = $traceType === 'model' ? 'eloquent_operation' : $traceType;
+            $subtype = $traceType;
         }
 
-        return compact('declaringFqcn', 'ownerKind', 'sourceScope', 'subtype');
+        return compact(
+            'declaringFqcn',
+            'ownerKind',
+            'sourceScope',
+            'subtype',
+            'receiverScope',
+            'declaringScope',
+            'receiverFile',
+            'declaringFile',
+        );
     }
 
     private function declaringFqcnForMethod(string $fqcn, string $method): ?string
@@ -391,6 +445,17 @@ class MethodTracer
                 $current = $info['parent'] ?? '';
 
                 continue;
+            }
+
+            try {
+                if (class_exists($current, false) || interface_exists($current, false) || trait_exists($current, false)) {
+                    $reflection = new \ReflectionClass($current);
+                    if ($reflection->hasMethod($method)) {
+                        return $reflection->getMethod($method)->getDeclaringClass()->getName();
+                    }
+                }
+            } catch (\ReflectionException) {
+                // Continue to the receiver-level reflection fallback below.
             }
 
             break;
@@ -408,41 +473,6 @@ class MethodTracer
         }
 
         return null;
-    }
-
-    private function sourceScopeFor(string $fqcn): string
-    {
-        if ($this->isFrameworkFqcn($fqcn)) {
-            return 'framework';
-        }
-
-        $file = $this->resolveFile($fqcn);
-        if ($file !== null) {
-            $normalized = str_replace('\\', '/', $file);
-            $root = rtrim(str_replace('\\', '/', $this->projectRoot), '/');
-            if ($root !== '' && str_starts_with($normalized, $root.'/vendor/')) {
-                return 'vendor';
-            }
-            if ($root !== '' && str_starts_with($normalized, $root.'/')) {
-                return 'application';
-            }
-            if (str_contains($normalized, '/vendor/')) {
-                return 'vendor';
-            }
-        }
-
-        if ($this->isThrowableType($fqcn) || in_array($fqcn, ['Throwable', 'Exception', 'Error'], true)) {
-            return 'runtime';
-        }
-
-        return 'unknown';
-    }
-
-    private function isFrameworkFqcn(string $fqcn): bool
-    {
-        return str_starts_with($fqcn, 'Illuminate\\')
-            || str_starts_with($fqcn, 'Laravel\\')
-            || str_starts_with($fqcn, 'Symfony\\');
     }
 
     private function isFormRequestType(string $fqcn): bool
@@ -573,6 +603,21 @@ class MethodTracer
                     $this->handleAssign($node);
                 } elseif ($node instanceof Node\Expr\ClassConstFetch) {
                     $this->handleClassConstFetch($node);
+                }
+
+                return null;
+            }
+
+            public function leaveNode(Node $node): ?int
+            {
+                if ($node instanceof Node\Expr\Assign
+                    && ! $node->expr instanceof Node\Expr\New_
+                    && $node->var instanceof Node\Expr\Variable
+                    && is_string($node->var->name)) {
+                    // A local assignment shadows a constructor/method dependency of the same
+                    // variable name. Without return-type propagation, unknown is more truthful
+                    // than attributing later calls to the stale injected type.
+                    unset($this->varTypeMap[$node->var->name]);
                 }
 
                 return null;
@@ -789,6 +834,19 @@ class MethodTracer
                             return;
                         }
                     }
+                }
+
+                // Inline route/console/schedule closures use a virtual caller identity,
+                // not a PHP class. Laravel may bind a closure to a runtime command object,
+                // but attributing an ordinary $this call to the virtual graph ID would
+                // fabricate a self-referential service method. Special calls such as
+                // dispatch(), view(), and send() have already been handled above.
+                if ($node->var instanceof Node\Expr\Variable
+                    && $node->var->name === 'this'
+                    && (str_starts_with($this->currentFqcn, 'route::')
+                        || str_starts_with($this->currentFqcn, 'command::')
+                        || str_starts_with($this->currentFqcn, 'schedule::'))) {
+                    return;
                 }
 
                 $fqcn = $this->resolveVar($node->var);
@@ -1160,7 +1218,7 @@ class MethodTracer
                 if ($decl === 'abstract_class') {
                     return 'abstract_class';
                 }
-                if (str_contains($fqcn, 'Controller') || str_contains($fqcn, '\\Http\\')) {
+                if (str_ends_with(class_basename($fqcn), 'Controller')) {
                     return 'action';
                 }
                 if (str_contains($fqcn, 'Repository') || str_contains($fqcn, '\\Repositories\\')) {
@@ -1171,9 +1229,6 @@ class MethodTracer
                 }
                 if (str_contains($fqcn, 'Event') || str_contains($fqcn, '\\Events\\')) {
                     return 'event';
-                }
-                if (str_contains($fqcn, '\\Models\\') || str_contains($fqcn, '\\Model\\')) {
-                    return 'model';
                 }
 
                 return 'service';

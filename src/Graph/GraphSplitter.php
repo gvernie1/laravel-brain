@@ -12,6 +12,7 @@ use LaraMint\LaravelBrain\Analysis\FilamentResourceDefinition;
 use LaraMint\LaravelBrain\Analysis\ModelDefinition;
 use LaraMint\LaravelBrain\Analysis\RouteDefinition;
 use LaraMint\LaravelBrain\Analysis\ScheduleEntry;
+use LaraMint\LaravelBrain\Analysis\SourceProvenance;
 
 class TabManifestEntry
 {
@@ -344,6 +345,8 @@ class GraphSplitter
                 label: $this->shortName($fqcn),
                 data: [
                     'fqcn' => $fqcn,
+                    'ownerKind' => 'model',
+                    'sourceScope' => SourceProvenance::scope($fqcn, $def->file, $projectRoot),
                     'file' => $def->file,
                     ...($relativeFile !== null
                         ? ['relativeFile' => $relativeFile]
@@ -676,18 +679,7 @@ class GraphSplitter
 
     private function relativeSourceFile(string $file, string $projectRoot): ?string
     {
-        if ($file === '' || $projectRoot === '') {
-            return null;
-        }
-        $resolvedFile = realpath($file);
-        $resolvedRoot = realpath($projectRoot);
-        $normalizedFile = str_replace('\\', '/', $resolvedFile !== false ? $resolvedFile : $file);
-        $normalizedRoot = rtrim(str_replace('\\', '/', $resolvedRoot !== false ? $resolvedRoot : $projectRoot), '/');
-        if (! str_starts_with($normalizedFile, $normalizedRoot.'/')) {
-            return null;
-        }
-
-        return substr($normalizedFile, strlen($normalizedRoot) + 1);
+        return SourceProvenance::relativePath($file, $projectRoot);
     }
 
     private function sanitizeId(string $group): string

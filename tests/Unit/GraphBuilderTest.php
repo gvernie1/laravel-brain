@@ -78,7 +78,7 @@ it('exposes parent controller nodes and extends edges for inherited actions', fu
 
     expect($ids)
         ->toBeArray()
-        ->toHaveCount(52)
+        ->toHaveCount(53)
         ->toContain('controller::App\\Http\\Controllers\\V3\\AbstractThingController');
 
     $handlesFromParent = array_filter(
@@ -139,7 +139,7 @@ it('adds IoC binding edges from service providers to interfaces and implementati
 
     expect($types)
         ->toBeArray()
-        ->toHaveCount(63)
+        ->toHaveCount(64)
         ->toContain('binding-resolution', 'binding-registered-in');
 
     $resolution = array_values(array_filter($graph->edges(), fn ($e) => $e->type === 'binding-resolution'));
