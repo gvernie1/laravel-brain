@@ -647,6 +647,7 @@ class GraphBuilder
         $id = match ($type) {
             'enum' => $this->enumNodeId($fqcn),
             'view' => $this->viewNodeId($fqcn),
+            'event' => $method !== '' ? $this->nodeIdForHop($fqcn, $method) : $this->eventId($fqcn),
             'interface' => $method !== '' ? $this->nodeIdForHop($fqcn, $method) : $this->interfaceNodeId($fqcn),
             'trait' => $this->traitNodeId($fqcn),
             default => $this->nodeIdForHop($fqcn, $method),
@@ -687,7 +688,7 @@ class GraphBuilder
             case 'interface':
                 $short = class_basename($fqcn);
                 $file = $this->resolveFile($fqcn);
-                $ownership = $method !== '' ? $this->methodOwnershipData($fqcn, $method, $traceEdge) : null;
+                $ownership = $method !== '' ? $this->methodOwnershipData($fqcn, $method, $traceEdge, 'interface') : null;
                 $info = ($file !== '' && is_file($file))
                     ? $this->getStructureInspector()->inspectFile($file)
                     : null;
@@ -719,7 +720,7 @@ class GraphBuilder
 
             case 'abstract_class':
                 $short = class_basename($fqcn);
-                $ownership = $this->methodOwnershipData($fqcn, $method, $traceEdge);
+                $ownership = $this->methodOwnershipData($fqcn, $method, $traceEdge, 'abstract_class');
                 $file = $ownership['file'];
                 $flowSteps = $this->extractMethodFlowSteps($fqcn, $method);
                 $absMetrics = $this->extractMethodMetrics($fqcn, $method);
@@ -745,7 +746,7 @@ class GraphBuilder
             case 'notification':
             case 'resource':
                 $short = class_basename($fqcn);
-                $ownership = $this->methodOwnershipData($fqcn, $method, $traceEdge);
+                $ownership = $this->methodOwnershipData($fqcn, $method, $traceEdge, $type);
                 $file = $ownership['file'];
                 $flowSteps = $method !== '' ? $this->extractMethodFlowSteps($fqcn, $method) : [];
                 $members = ($file !== '' && is_file($file))
@@ -768,7 +769,7 @@ class GraphBuilder
 
             case 'model':
                 $short = class_basename($fqcn);
-                $ownership = $this->methodOwnershipData($fqcn, $method, $traceEdge);
+                $ownership = $this->methodOwnershipData($fqcn, $method, $traceEdge, 'model');
                 $file = isset($models[$fqcn]) ? $models[$fqcn]->file : $this->resolveFile($fqcn);
                 $flowSteps = $method ? $this->extractMethodFlowSteps($fqcn, $method) : [];
                 $this->graph->addNode(new Node($id, 'model', $method ? "{$short}::{$method}" : $short, [
@@ -786,7 +787,7 @@ class GraphBuilder
 
             case 'job':
                 $short = class_basename($fqcn);
-                $ownership = $this->methodOwnershipData($fqcn, $method, $traceEdge);
+                $ownership = $this->methodOwnershipData($fqcn, $method, $traceEdge, 'job');
                 $file = $ownership['file'];
                 $flowSteps = $method ? $this->extractMethodFlowSteps($fqcn, $method) : [];
                 $this->graph->addNode(new Node($id, 'job', $method ? "{$short}@{$method}" : $short, [
@@ -803,8 +804,13 @@ class GraphBuilder
                 break;
 
             case 'event':
+                if ($method === '') {
+                    $this->addEventNode($fqcn, $id);
+
+                    break;
+                }
                 $short = class_basename($fqcn);
-                $ownership = $this->methodOwnershipData($fqcn, $method, $traceEdge);
+                $ownership = $this->methodOwnershipData($fqcn, $method, $traceEdge, 'event');
                 $file = $ownership['file'];
                 $flowSteps = $method ? $this->extractMethodFlowSteps($fqcn, $method) : [];
                 $this->graph->addNode(new Node($id, 'event', $method ? "{$short}@{$method}" : $short, [
@@ -822,7 +828,7 @@ class GraphBuilder
 
             case 'listener':
                 $short = class_basename($fqcn);
-                $ownership = $this->methodOwnershipData($fqcn, $method, $traceEdge);
+                $ownership = $this->methodOwnershipData($fqcn, $method, $traceEdge, 'listener');
                 $file = $ownership['file'];
                 $flowSteps = $method ? $this->extractMethodFlowSteps($fqcn, $method) : [];
                 $this->graph->addNode(new Node($id, 'listener', $method ? "{$short}@{$method}" : $short, [
@@ -840,7 +846,7 @@ class GraphBuilder
 
             case 'repository':
                 $short = class_basename($fqcn);
-                $ownership = $this->methodOwnershipData($fqcn, $method, $traceEdge);
+                $ownership = $this->methodOwnershipData($fqcn, $method, $traceEdge, 'repository');
                 $file = $ownership['file'];
                 $flowSteps = $this->extractMethodFlowSteps($fqcn, $method);
                 $repoMetrics = $this->extractMethodMetrics($fqcn, $method);
@@ -864,7 +870,7 @@ class GraphBuilder
 
             case 'facade':
                 $short = class_basename($fqcn);
-                $ownership = $this->methodOwnershipData($fqcn, $method, $traceEdge);
+                $ownership = $this->methodOwnershipData($fqcn, $method, $traceEdge, 'facade');
                 $file = $ownership['file'];
                 $members = ($file !== '' && is_file($file))
                     ? $this->getStructureInspector()->listClassMethods($file)
@@ -912,7 +918,7 @@ class GraphBuilder
         ?CallChainEdge $traceEdge = null,
     ): void {
         $short = class_basename($fqcn);
-        $ownership = $this->methodOwnershipData($fqcn, $method, $traceEdge);
+        $ownership = $this->methodOwnershipData($fqcn, $method, $traceEdge, $graphNodeType);
         $file = $graphNodeType === 'validation_request'
             ? $this->resolveFile($fqcn)
             : $ownership['file'];
@@ -953,8 +959,12 @@ class GraphBuilder
      *
      * @return array{file:string,metadata:array<string,mixed>}
      */
-    private function methodOwnershipData(string $fqcn, string $method, ?CallChainEdge $edge): array
-    {
+    private function methodOwnershipData(
+        string $fqcn,
+        string $method,
+        ?CallChainEdge $edge,
+        ?string $semanticKind = null,
+    ): array {
         $receiverFqcn = $edge?->receiverFqcn ?: $fqcn;
         $location = $this->findMethodNodeInChain($fqcn, $method);
         $declaringFqcn = $edge?->declaringFqcn
@@ -986,6 +996,19 @@ class GraphBuilder
             'exception' => $method === '__construct' ? 'exception_constructor' : 'exception_method',
             default => $ownerKind,
         };
+
+        $strongOwnerKind = match ($semanticKind) {
+            'validation_request' => 'form_request',
+            'filament_page_method' => 'filament_page',
+            'abstract_class', 'interface', 'model', 'job', 'event', 'listener',
+            'mail', 'notification', 'resource', 'repository', 'facade', 'command',
+            'filament_page' => $semanticKind,
+            default => null,
+        };
+        if ($strongOwnerKind !== null) {
+            $ownerKind = $strongOwnerKind;
+            $subtype = $semanticKind === 'validation_request' ? 'validation_request' : $semanticKind;
+        }
 
         $metadata = [
             'receiverFqcn' => $receiverFqcn,
@@ -1253,6 +1276,9 @@ class GraphBuilder
         return match ($edge->type) {
             'enum' => $this->enumNodeId($edge->calleeFqcn),
             'view' => $this->viewNodeId($edge->calleeFqcn),
+            'event' => $edge->calleeMethod !== ''
+                ? $this->nodeIdForHop($edge->calleeFqcn, $edge->calleeMethod)
+                : $this->eventId($edge->calleeFqcn),
             'interface' => $this->nodeIdForHop($edge->calleeFqcn, $edge->calleeMethod),
             'trait' => $this->traitNodeId($edge->calleeFqcn),
             default => $this->nodeIdForHop($edge->calleeFqcn, $edge->calleeMethod),
@@ -1384,7 +1410,7 @@ class GraphBuilder
             $flowSteps = $this->flowExtractor->extract($methodLocation['methodNode'], $methodLocation['useMap']);
             $classified = $this->classifyFqcn($declaringFqcn);
             $parentType = $this->effectiveCalleeGraphType($declaringFqcn, $classified);
-            $ownership = $this->methodOwnershipData($declaringFqcn, $method, null);
+            $ownership = $this->methodOwnershipData($declaringFqcn, $method, null, $parentType);
             $this->graph->addNode(new Node($parentNodeId, $parentType, "{$short}@{$method}", [
                 'fqcn' => $declaringFqcn,
                 'method' => $method,
@@ -2393,7 +2419,7 @@ class GraphBuilder
                 $metrics = $this->extractMethodMetrics($cmd->class, 'handle');
                 $hasN1 = $this->hasN1InSteps($flowSteps);
                 $classToCmdId[$cmd->class] = $id;
-                $ownership = $this->methodOwnershipData($cmd->class, 'handle', null);
+                $ownership = $this->methodOwnershipData($cmd->class, 'handle', null, 'command');
             }
 
             if (! $this->graph->hasNode($id)) {
@@ -2407,9 +2433,9 @@ class GraphBuilder
                         'fqcn' => $cmd->class,
                         'method' => 'handle',
                         ...$ownership['metadata'],
-                        'ownerKind' => 'command',
-                        'subtype' => 'command',
                     ] : []),
+                    'ownerKind' => 'command',
+                    'subtype' => 'command',
                     'file' => $cmd->file,
                     'source' => $cmd->source,
                     'sourceScope' => $ownership['metadata']['sourceScope'] ?? $cmd->sourceScope,
@@ -2450,7 +2476,9 @@ class GraphBuilder
                 'modifiers' => $entry->modifiers,
                 'targetResolution' => $entry->targetResolution,
                 'targetClass' => $entry->targetClass,
-                'sourceScope' => $entry->sourceScope,
+                'sourceScope' => $entry->definitionScope,
+                'definitionScope' => $entry->definitionScope,
+                'targetScope' => $entry->targetScope,
                 'file' => $entry->file,
                 'line' => $entry->line,
             ]));
@@ -2794,7 +2822,7 @@ class GraphBuilder
                     $flowSteps = $this->extractMethodFlowSteps($page->fqcn, $method);
                     $metrics = $this->extractMethodMetrics($page->fqcn, $method);
                     $visibility = $this->extractVisibility($page->fqcn, $method);
-                    $ownership = $this->methodOwnershipData($page->fqcn, $method, null);
+                    $ownership = $this->methodOwnershipData($page->fqcn, $method, null, 'filament_page_method');
                     $this->graph->addNode(new Node($methodId, 'filament_page_method', $method, [
                         'fqcn' => $page->fqcn,
                         'method' => $method,

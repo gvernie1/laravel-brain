@@ -7,13 +7,8 @@ namespace LaraMint\LaravelBrain\Ai;
 use LaraMint\LaravelBrain\Storage\GraphStore;
 
 /**
- * Reconstructs a single full-graph structure from the per-tab
- * subgraphs written by a scan.
- *
- * The scan no longer persists a monolithic graph; the split subgraphs
- * are the source of truth. Each subgraph is a forward-only slice of
- * the lifecycle, so the same node/edge can appear in many of them — they
- * are de-duplicated by id here so counts and traversal stay correct.
+ * Loads the canonical graph for machine consumers. Older format-v2 scans
+ * without that artifact retain a compatibility fallback that merges tabs.
  */
 final class MergedGraph
 {
@@ -28,6 +23,22 @@ final class MergedGraph
             throw new \RuntimeException('No scan data found — run php artisan brain:scan first');
         }
 
+        $canonical = $store->getFullGraph();
+        if ($canonical !== null) {
+            $data = json_decode($canonical, true);
+            if (! is_array($data)
+                || ! isset($data['meta'], $data['nodes'], $data['edges'])
+                || ! is_array($data['meta'])
+                || ! is_array($data['nodes'])
+                || ! is_array($data['edges'])) {
+                throw new \RuntimeException('Canonical graph data is invalid — run php artisan brain:scan again');
+            }
+
+            return $data;
+        }
+
+        // Legacy fallback: presentation tabs are partial forward slices and may
+        // omit facts. New scans always persist the authoritative full graph.
         /** @var array<string, array<string, mixed>> $nodes */
         $nodes = [];
         /** @var array<string, array<string, mixed>> $edges */

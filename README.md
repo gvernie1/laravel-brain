@@ -388,9 +388,15 @@ With the default `file` driver, `brain:scan` writes these files to
 `storage/app/laravel-brain/`:
 
 ```
-.graph-manifest.json   — Tab manifest (list of all route tabs)
-.graph-{tab-id}.json   — Per-route subgraph (one per route)
+.graph-full.json       — Authoritative canonical graph for machine consumers
+.graph-manifest.json   — Snapshot metadata and presentation-tab index
+.graph-{tab-id}.json   — Route/command/job/schedule/etc. presentation graph
 ```
+
+Presentation tabs are intentionally partial projections; consumers that need
+the complete factual graph should read the canonical artifact through
+`GraphStore::getFullGraph()`. See [Graph format v2](docs/graph-format-v2.md) for
+the stable identity, relationship, ownership, and provenance contract.
 
 They are regenerated on every scan and are safe to gitignore:
 

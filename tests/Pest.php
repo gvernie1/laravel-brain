@@ -15,6 +15,7 @@ use PHPUnit\Framework\TestCase;
 
 // Unit tests use plain PHPUnit\Framework\TestCase (no Laravel)
 pest()->extend(TestCase::class)->in('Unit');
+pest()->extend(Orchestra\Testbench\TestCase::class)->in('Feature');
 
 /*
 |--------------------------------------------------------------------------

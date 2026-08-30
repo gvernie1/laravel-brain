@@ -57,11 +57,14 @@ class ScheduleEntry
         public ?int $line = null,
         public string $targetResolution = 'unresolved',
         public ?string $targetClass = null,
-        public string $sourceScope = 'unknown',
+        /** Scope of the schedule definition itself; retained as the node sourceScope. */
+        public string $sourceScope = 'application',
         /** Internal AST only; GraphBuilder never exports parser nodes. */
         public Node\Expr\Closure|Node\Expr\ArrowFunction|null $closureNode = null,
         /** @var array<string,string> */
         public array $closureUseMap = [],
+        public string $definitionScope = 'application',
+        public string $targetScope = 'unknown',
     ) {
         $this->rawInvocation = $this->rawInvocation !== '' ? $this->rawInvocation : $this->target;
         $this->canonicalTarget = $this->canonicalTarget !== ''
@@ -786,12 +789,15 @@ class ConsoleAnalyzer
         }
 
         foreach ($schedule as $entry) {
+            $entry->definitionScope = SourceProvenance::scope('', $entry->file, $root);
+            $entry->sourceScope = $entry->definitionScope;
+
             if ($entry->type === 'command') {
                 $command = $byName[$entry->canonicalTarget] ?? null;
                 if ($command !== null && $command->sourceScope === 'application') {
                     $entry->targetResolution = 'local';
                     $entry->targetClass = $command->class !== '' ? $command->class : null;
-                    $entry->sourceScope = 'application';
+                    $entry->targetScope = 'application';
                 }
 
                 continue;
@@ -801,14 +807,14 @@ class ConsoleAnalyzer
                 if ($file !== null) {
                     $entry->targetResolution = 'local';
                     $entry->targetClass = $entry->canonicalTarget;
-                    $entry->sourceScope = 'application';
+                    $entry->targetScope = 'application';
                 }
 
                 continue;
             }
 
             $entry->targetResolution = 'local';
-            $entry->sourceScope = 'application';
+            $entry->targetScope = $entry->definitionScope;
         }
     }
 

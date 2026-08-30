@@ -9,6 +9,7 @@ use LaraMint\LaravelBrain\Analysis\Incremental\ScopedRebuildNotApplicable;
 use LaraMint\LaravelBrain\Analysis\ProjectAnalyzer;
 use LaraMint\LaravelBrain\Graph\Graph;
 use LaraMint\LaravelBrain\Storage\GraphStoreFactory;
+use LaraMint\LaravelBrain\Storage\GraphStoreWriter;
 
 class ScanCommand extends Command
 {
@@ -255,12 +256,7 @@ class ScanCommand extends Command
         $this->lastGraph = $result->fullGraph;
 
         $store = GraphStoreFactory::make();
-        $store->ensureSchema();
-        $store->putManifest($result->manifestJson);
-
-        foreach ($result->subgraphs as $tabId => $subgraph) {
-            $store->putSubgraph((string) $tabId, $subgraph->toJson());
-        }
+        GraphStoreWriter::persist($store, $result->fullGraph, $result->manifestJson, $result->subgraphs);
 
         // The one-time support prompt flag lives on disk regardless of driver.
         $storageDir = storage_path('app/laravel-brain');

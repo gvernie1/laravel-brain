@@ -31,13 +31,25 @@ final class FileGraphStore implements GraphStore
     {
         $this->ensureDir();
 
-        // Legacy monolithic graph from older scans; split files are canonical now.
+        // The old .graph-all.json had different legacy semantics. The canonical
+        // graph introduced for format v2 uses the unambiguous `full` identity.
         $stale = $this->dir.'/.graph-all.json';
         if (file_exists($stale)) {
             @unlink($stale);
         }
 
         file_put_contents($this->path('manifest'), $json);
+    }
+
+    public function getFullGraph(): ?string
+    {
+        return $this->read('full');
+    }
+
+    public function putFullGraph(string $json): void
+    {
+        $this->ensureDir();
+        file_put_contents($this->path('full'), $json);
     }
 
     public function getSubgraph(string $tabId): ?string
@@ -57,7 +69,7 @@ final class FileGraphStore implements GraphStore
 
         foreach (glob($this->dir.'/.graph-*.json') ?: [] as $file) {
             $base = basename($file);
-            if ($base === '.graph-manifest.json' || $base === '.graph-all.json') {
+            if (in_array($base, ['.graph-manifest.json', '.graph-full.json', '.graph-all.json'], true)) {
                 continue;
             }
             $ids[] = substr($base, strlen('.graph-'), -strlen('.json'));

@@ -18,6 +18,8 @@ final class DatabaseGraphStore implements GraphStore
 {
     private const MANIFEST_KEY = '__manifest__';
 
+    private const FULL_GRAPH_KEY = '__full__';
+
     public function __construct(
         private readonly string $table = 'laravel_brain_graphs',
         private readonly ?string $connection = null,
@@ -55,6 +57,16 @@ final class DatabaseGraphStore implements GraphStore
         $this->put(self::MANIFEST_KEY, $json);
     }
 
+    public function getFullGraph(): ?string
+    {
+        return $this->read(self::FULL_GRAPH_KEY);
+    }
+
+    public function putFullGraph(string $json): void
+    {
+        $this->put(self::FULL_GRAPH_KEY, $json);
+    }
+
     public function getSubgraph(string $tabId): ?string
     {
         return $this->read($tabId);
@@ -72,7 +84,7 @@ final class DatabaseGraphStore implements GraphStore
         }
 
         $ids = $this->query()
-            ->where('tab', '!=', self::MANIFEST_KEY)
+            ->whereNotIn('tab', [self::MANIFEST_KEY, self::FULL_GRAPH_KEY])
             ->pluck('tab')
             ->all();
 

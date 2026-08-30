@@ -476,6 +476,10 @@ class GraphSplitter
             // Bumped to 2 when edge ids became content-addressed (stable across rebuilds) instead
             // of insertion-sequential. Consumers that persisted v1 edge ids should invalidate once.
             'graphFormatVersion' => 2,
+            'canonicalGraph' => [
+                'available' => true,
+                'identity' => 'full',
+            ],
             'totalRoutes' => $totalRoutes,
             'totalNodes' => $fullGraph->nodeCount(),
             'totalEdges' => $fullGraph->edgeCount(),

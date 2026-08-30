@@ -143,6 +143,7 @@ it('parses complete schedule chains and canonical command identities', function 
         ->and($closure)->not->toBeNull()
         ->declaredSignature->toBe('reports:closure {account?}')
         ->source->toBe('route')
+        ->sourceScope->toBe('application')
         ->and($dailyAt)->not->toBeNull()
         ->target->toBe('reports:sync acme --force')
         ->rawInvocation->toBe('reports:sync acme --force')
@@ -151,6 +152,9 @@ it('parses complete schedule chains and canonical command identities', function 
         ->invocationOptions->toContain('--force', ['--limit' => 10])
         ->targetResolution->toBe('local')
         ->targetClass->toBe('App\Console\Commands\SyncReports')
+        ->definitionScope->toBe('application')
+        ->sourceScope->toBe('application')
+        ->targetScope->toBe('application')
         ->and(array_column($dailyAt->modifiers, 'method'))->toBe(['timezone', 'withoutOverlapping'])
         ->and($dailyAt->modifiers[0]['arguments'])->toBe(['America/Toronto'])
         ->and($dailyAt->modifiers[1]['arguments'])->toBe([15])
@@ -166,6 +170,9 @@ it('parses complete schedule chains and canonical command identities', function 
         ->and($external)->not->toBeNull()
         ->targetResolution->toBe('unresolved')
         ->targetClass->toBeNull()
+        ->definitionScope->toBe('application')
+        ->sourceScope->toBe('application')
+        ->targetScope->toBe('unknown')
         ->and($bootstrap)->not->toBeNull()
         ->and(array_column($bootstrap->modifiers, 'method'))->toBe(['withoutOverlapping']);
 
@@ -209,8 +216,18 @@ it('links schedules to local command and job lifecycles without fabricating pack
     $external = array_values(array_filter($scheduleNodes, fn ($node) => ($node->data['canonicalTarget'] ?? null) === 'vendor:prune'))[0];
     expect($local->data['rawInvocation'])->toBe('reports:sync acme --force')
         ->and($local->data['targetResolution'])->toBe('local')
+        ->and($local->data)->toMatchArray([
+            'sourceScope' => 'application',
+            'definitionScope' => 'application',
+            'targetScope' => 'application',
+        ])
         ->and($external->data['targetResolution'])->toBe('unresolved')
-        ->and($external->data['targetClass'])->toBeNull();
+        ->and($external->data['targetClass'])->toBeNull()
+        ->and($external->data)->toMatchArray([
+            'sourceScope' => 'application',
+            'definitionScope' => 'application',
+            'targetScope' => 'unknown',
+        ]);
 
     foreach ($graph->edges() as $edge) {
         expect($graph->hasNode($edge->source))->toBeTrue()

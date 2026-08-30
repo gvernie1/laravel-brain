@@ -189,7 +189,8 @@ class Importer
     $imported = $describe($tracer->traceMethod('App\Outside\Importer', 'go', $psr4, $root));
 
     expect($sibling)->toBe($imported)
-        ->and($sibling)->toContain('App\Events\ThingHappened::__construct (event)');
+        ->and($sibling)->toContain('App\Events\ThingHappened:: (event)')
+        ->and($sibling)->not->toContain('App\Events\ThingHappened::__construct (event)');
 
     exec('rm -rf '.escapeshellarg($root));
 });

@@ -7,9 +7,9 @@ namespace LaraMint\LaravelBrain\Storage;
 /**
  * Persistence backend for scan output.
  *
- * A scan produces one manifest (the tab index) plus one subgraph JSON blob
- * per tab. Implementations decide where those blobs live — the filesystem
- * (default) or a database table.
+ * A scan produces one authoritative full graph, one manifest (the tab index),
+ * and one presentation subgraph JSON blob per tab. Implementations decide
+ * where those blobs live — the filesystem (default) or a database table.
  */
 interface GraphStore
 {
@@ -25,12 +25,18 @@ interface GraphStore
 
     public function putManifest(string $json): void;
 
+    /** Canonical graph for machine consumers; never an ordinary UI tab. */
+    public function getFullGraph(): ?string;
+
+    public function putFullGraph(string $json): void;
+
     public function getSubgraph(string $tabId): ?string;
 
     public function putSubgraph(string $tabId, string $json): void;
 
     /**
-     * Tab ids of every stored subgraph (manifest excluded).
+     * Tab ids of every stored presentation subgraph (manifest and canonical
+     * full graph excluded).
      *
      * @return list<string>
      */

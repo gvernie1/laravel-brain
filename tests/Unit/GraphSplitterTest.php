@@ -83,11 +83,19 @@ it('aggregates n+1, fat method and fat class issues from the lifecycle subgraph'
         ->and($entry->riskLevel)->toBe('none');
 
     $json = $splitter->buildManifestJson($split['manifest'], $graph, 'proj', '2026-05-16T00:00:00Z', 1);
-    $tab = json_decode($json, true)['tabs'][0];
+    $decoded = json_decode($json, true);
+    $tab = $decoded['tabs'][0];
     expect($tab['issueCount'])->toBe(3)
         ->and($tab['n1Count'])->toBe(1)
         ->and($tab['fatMethodCount'])->toBe(1)
-        ->and($tab['fatClassCount'])->toBe(1);
+        ->and($tab['fatClassCount'])->toBe(1)
+        ->and($decoded['graphFormatVersion'])->toBe(2)
+        ->and($decoded['canonicalGraph'])->toBe([
+            'available' => true,
+            'identity' => 'full',
+        ])
+        ->and($decoded['totalNodes'])->toBe($graph->nodeCount())
+        ->and($decoded['totalEdges'])->toBe($graph->edgeCount());
 });
 
 it('aggregates route security issues into the manifest entry', function () {

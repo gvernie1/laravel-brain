@@ -139,7 +139,9 @@ it('adds IoC binding edges from service providers to interfaces and implementati
 
     expect($types)
         ->toBeArray()
-        ->toHaveCount(64)
+        // A constructor-less event now contributes one class-level dispatch edge,
+        // not duplicate fabricated __construct lifecycles.
+        ->toHaveCount(63)
         ->toContain('binding-resolution', 'binding-registered-in');
 
     $resolution = array_values(array_filter($graph->edges(), fn ($e) => $e->type === 'binding-resolution'));

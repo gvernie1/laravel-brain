@@ -13,6 +13,7 @@ use LaraMint\LaravelBrain\Ai\RulesExporter;
 use LaraMint\LaravelBrain\Ai\UsageFinder;
 use LaraMint\LaravelBrain\Analysis\ProjectAnalyzer;
 use LaraMint\LaravelBrain\Storage\GraphStoreFactory;
+use LaraMint\LaravelBrain\Storage\GraphStoreWriter;
 
 class BrainController extends Controller
 {
@@ -51,11 +52,7 @@ class BrainController extends Controller
             $store->hasManifest() ? $store->getManifest() : null,
         );
 
-        $store->putManifest($manifestJson);
-
-        foreach ($result->subgraphs as $tabId => $subgraph) {
-            $store->putSubgraph((string) $tabId, $subgraph->toJson());
-        }
+        GraphStoreWriter::persist($store, $result->fullGraph, $manifestJson, $result->subgraphs);
 
         return response()->json([
             'success' => true,
@@ -329,9 +326,11 @@ class BrainController extends Controller
 
         if (preg_match('/^\.graph-([a-z0-9_-]+)\.json$/', $any, $m)) {
             $store = GraphStoreFactory::make();
-            $payload = $m[1] === 'manifest'
-                ? $store->getManifest()
-                : $store->getSubgraph($m[1]);
+            $payload = match ($m[1]) {
+                'manifest' => $store->getManifest(),
+                'full' => $store->getFullGraph(),
+                default => $store->getSubgraph($m[1]),
+            };
 
             if ($payload === null) {
                 return response()->json(

@@ -542,6 +542,7 @@ PHP,
     $graph = $builder->build('closures', [], new MiddlewareRegistry([], [], []), [], [], [], $root);
     $builder->addConsoleCommands($result['commands'], $result['schedule'], $edges);
     $types = array_map(static fn ($edge): string => $edge->type, $graph->edges());
+    $closureCommand = $graph->getNode('command::reports:run');
     $virtualSelfEdges = array_filter(
         $graph->edges(),
         static fn ($edge): bool => $edge->source === $edge->target
@@ -549,6 +550,13 @@ PHP,
     );
 
     expect($types)->toContain('command-to-service', 'schedule-to-job', 'job-to-service', 'service-to-model')
+        ->and($closureCommand)->not->toBeNull()
+        ->and($closureCommand->data)->toMatchArray([
+            'ownerKind' => 'command',
+            'sourceScope' => 'application',
+            'file' => $root.'/routes/console.php',
+        ])
+        ->and($closureCommand->data)->not->toHaveKey('fqcn')
         ->and($virtualSelfEdges)->toBeEmpty()
         ->and($graph->toJson())->not->toContain('PhpParser');
 

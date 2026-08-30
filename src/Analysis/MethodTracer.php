@@ -385,7 +385,7 @@ class MethodTracer
         } elseif ($traceType === 'model') {
             $ownerKind = 'model';
             $subtype = 'eloquent_operation';
-        } elseif (in_array($traceType, ['job', 'event', 'listener', 'mail', 'notification', 'interface', 'abstract_class', 'resource'], true)) {
+        } elseif (in_array($traceType, ['job', 'event', 'listener', 'mail', 'notification', 'interface', 'abstract_class', 'resource', 'repository', 'enum', 'trait'], true)) {
             $ownerKind = $traceType;
             $subtype = $traceType;
         } elseif ($declaringScope === 'framework') {
@@ -473,6 +473,12 @@ class MethodTracer
         }
 
         return null;
+    }
+
+    /** Whether object construction invokes a declared or inherited constructor. */
+    public function hasExecutableConstructor(string $fqcn): bool
+    {
+        return $this->declaringFqcnForMethod($fqcn, '__construct') !== null;
     }
 
     private function isFormRequestType(string $fqcn): bool
@@ -661,9 +667,10 @@ class MethodTracer
                 if (in_array($class, ['Event', 'Illuminate\\Support\\Facades\\Event'], true) && $method === 'dispatch') {
                     $eventClass = $this->extractNewClass($node->args[0] ?? null);
                     if ($eventClass) {
+                        $eventFqcn = $this->useMap[$eventClass] ?? $eventClass;
                         $this->hops[] = [
-                            'fqcn' => $this->useMap[$eventClass] ?? $eventClass,
-                            'method' => '__construct',
+                            'fqcn' => $eventFqcn,
+                            'method' => $this->tracer->hasExecutableConstructor($eventFqcn) ? '__construct' : '',
                             'type' => 'event',
                             'visibility' => 'public',
                         ];
@@ -889,9 +896,10 @@ class MethodTracer
                 if (in_array($funcName, self::EVENT_FUNCTIONS, true)) {
                     $eventClass = $this->extractNewClass($node->args[0] ?? null);
                     if ($eventClass) {
+                        $eventFqcn = $this->useMap[$eventClass] ?? $eventClass;
                         $this->hops[] = [
-                            'fqcn' => $this->useMap[$eventClass] ?? $eventClass,
-                            'method' => '__construct',
+                            'fqcn' => $eventFqcn,
+                            'method' => $this->tracer->hasExecutableConstructor($eventFqcn) ? '__construct' : '',
                             'type' => 'event',
                             'visibility' => 'public',
                         ];
@@ -958,7 +966,10 @@ class MethodTracer
 
                     return;
                 }
-                if (! $this->looksLikeModel($fqcn) && ! $this->isFrameworkClass($fqcn) && str_contains($fqcn, '\\')) {
+                if (! $this->looksLikeModel($fqcn)
+                    && ! $this->isFrameworkClass($fqcn)
+                    && str_contains($fqcn, '\\')
+                    && $this->tracer->hasExecutableConstructor($fqcn)) {
                     $type = $this->classifyFqcn($fqcn);
                     $this->hops[] = [
                         'fqcn' => $fqcn,
@@ -1093,6 +1104,14 @@ class MethodTracer
             /** Resolve a variable node to its FQCN, handling $this->prop chains */
             private function resolveVar(Node\Expr $node): ?string
             {
+                // (new Foo)->run(): construction may have no executable constructor,
+                // but the receiver type of the real run() call is still statically known.
+                if ($node instanceof Node\Expr\New_ && $node->class instanceof Node\Name) {
+                    $written = $node->class->toString();
+
+                    return PhpFileParser::resolvedName($node->class) ?? $this->useMap[$written] ?? $written;
+                }
+
                 // $this->prop OR $this (direct call)
                 if ($node instanceof Node\Expr\Variable && $node->name === 'this') {
                     return $this->currentFqcn;
