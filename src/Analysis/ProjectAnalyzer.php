@@ -351,6 +351,18 @@ class ProjectAnalyzer
                 $commandEdges = array_merge($commandEdges, $edges);
             }
         }
+        $scheduledJobClasses = [];
+        foreach ($schedules as $schedule) {
+            if ($schedule->type !== 'job'
+                || $schedule->targetResolution !== 'local'
+                || $schedule->canonicalTarget === ''
+                || isset($scheduledJobClasses[$schedule->canonicalTarget])) {
+                continue;
+            }
+            $scheduledJobClasses[$schedule->canonicalTarget] = true;
+            $edges = $this->methodTracer->traceMethod($schedule->canonicalTarget, 'handle', $psr4Map, $projectRoot);
+            $commandEdges = array_merge($commandEdges, $edges);
+        }
         $this->emit('step:done', ['step' => 'cmd_chains', 'count' => count($commandEdges), 'unit' => 'call edge', 'message' => '    Discovered '.count($commandEdges).' command call chain edge(s)']);
 
         $this->emit('step:start', ['step' => 'ch_chains', 'label' => 'Tracing channel call chains', 'message' => '  → Tracing channel call chains...']);
@@ -467,6 +479,8 @@ class ProjectAnalyzer
             $fullGraph = IncrementalMerge::applyPartial($mergeInto, $fullGraph, $scopeToFiles);
         }
 
+        $this->graphBuilder->addRelativeSourcePaths($fullGraph);
+
         $this->emit('step:done', ['step' => 'graph', 'count' => $fullGraph->nodeCount(), 'unit' => 'node', 'extra' => $fullGraph->edgeCount().' edges', 'message' => "    {$fullGraph->nodeCount()} nodes, {$fullGraph->edgeCount()} edges"]);
 
         $this->emit('step:start', ['step' => 'split', 'label' => 'Splitting into tab subgraphs', 'message' => '  → Splitting into tab subgraphs...']);
@@ -479,7 +493,7 @@ class ProjectAnalyzer
         $erdModels = $models;
         ksort($erdModels);
 
-        $erd = $this->graphSplitter->buildErdTab($erdModels, $projectName, $analyzedAt);
+        $erd = $this->graphSplitter->buildErdTab($erdModels, $projectName, $analyzedAt, $projectRoot);
         if ($erd !== null) {
             $split['subgraphs'][$erd['id']] = $erd['graph'];
             $split['manifest'][] = $erd['manifest'];

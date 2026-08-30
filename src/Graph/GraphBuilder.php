@@ -323,13 +323,10 @@ class GraphBuilder
             ];
         }
 
-        // Method not in this class — walk up to the parent if it is an app class.
+        // Method not in this class — walk up to its declaring parent. Vendor/framework
+        // declarations are useful provenance even though Brain does not recursively trace them.
         $parentFqcn = $info['parent'];
-        if (
-            $parentFqcn !== null
-            && ! str_starts_with($parentFqcn, 'Illuminate\\')
-            && ! str_starts_with($parentFqcn, 'Laravel\\')
-        ) {
+        if ($parentFqcn !== null) {
             return $this->findMethodNodeInChain($parentFqcn, $method, $depth + 1);
         }
 
@@ -524,17 +521,17 @@ class GraphBuilder
             $callerNode = $this->nodeIdForHop($edge->callerFqcn, $edge->callerMethod);
             $calleeNode = $this->hopCalleeNodeId($edge);
 
-            $calleeGraphType = $this->effectiveCalleeGraphType($edge->calleeFqcn, $edge->type);
+            $calleeGraphType = $this->effectiveCalleeGraphType($edge->calleeFqcn, $edge->type, $edge->calleeMethod);
 
             // Ensure callee node exists
-            $this->ensureNode($edge->calleeFqcn, $edge->calleeMethod, $calleeGraphType, $models);
+            $this->ensureNode($edge->calleeFqcn, $edge->calleeMethod, $calleeGraphType, $models, $edge);
 
             // Ensure caller node exists (may be a service/repo itself in deep chains)
             // The controller action node is already created in step 1; for others, create here.
             if (! $this->graph->hasNode($callerNode)) {
                 // Determine caller type by re-classifying
                 $callerClassified = $this->classifyFqcn($edge->callerFqcn);
-                $callerGraphType = $this->effectiveCalleeGraphType($edge->callerFqcn, $callerClassified);
+                $callerGraphType = $this->effectiveCalleeGraphType($edge->callerFqcn, $callerClassified, $edge->callerMethod);
                 $this->ensureNode($edge->callerFqcn, $edge->callerMethod, $callerGraphType, $models);
             }
 
@@ -592,6 +589,8 @@ class GraphBuilder
             }
         }
 
+        $this->addRelativeSourcePaths();
+
         return $this->graph;
     }
 
@@ -600,8 +599,13 @@ class GraphBuilder
     /**
      * Given a callee from a CallChainEdge, create the appropriate typed node.
      */
-    private function ensureNode(string $fqcn, string $method, string $type, array $models): void
-    {
+    private function ensureNode(
+        string $fqcn,
+        string $method,
+        string $type,
+        array $models,
+        ?CallChainEdge $traceEdge = null,
+    ): void {
         $id = match ($type) {
             'enum' => $this->enumNodeId($fqcn),
             'view' => $this->viewNodeId($fqcn),
@@ -774,26 +778,26 @@ class GraphBuilder
 
             case 'repository':
                 $short = class_basename($fqcn);
-                $file = $this->resolveFile($fqcn);
+                $ownership = $this->methodOwnershipData($fqcn, $method, $traceEdge);
+                $file = $ownership['file'];
                 $flowSteps = $this->extractMethodFlowSteps($fqcn, $method);
                 $repoMetrics = $this->extractMethodMetrics($fqcn, $method);
-                $validationRules = $this->validationRulesForFile($file);
                 $this->graph->addNode(new Node($id, 'service', "{$short}@{$method}", [
                     'fqcn' => $fqcn,
                     'method' => $method,
-                    'subtype' => 'repository',
+                    ...$ownership['metadata'],
+                    'subtype' => $ownership['metadata']['subtype'] ?: 'repository',
                     'file' => $file,
                     'flowSteps' => $flowSteps,
                     'visibility' => $this->extractVisibility($fqcn, $method),
                     ...($repoMetrics ? ['metrics' => $repoMetrics] : []),
                     ...($this->hasN1InSteps($flowSteps) ? ['hasN1' => true] : []),
                     ...($this->isFatMethod($repoMetrics) ? ['fatMethod' => true] : []),
-                    ...(empty($validationRules) ? [] : ['validationRules' => $validationRules]),
                 ]));
                 break;
 
             case 'validation_request':
-                $this->addHopServiceClassNode($id, $fqcn, $method, 'validation_request', 'validation_request');
+                $this->addHopServiceClassNode($id, $fqcn, $method, 'validation_request', 'validation_request', $traceEdge);
                 break;
 
             case 'facade':
@@ -823,7 +827,7 @@ class GraphBuilder
                 break;
 
             default: // service
-                $this->addHopServiceClassNode($id, $fqcn, $method, 'service', 'service');
+                $this->addHopServiceClassNode($id, $fqcn, $method, 'service', 'service', $traceEdge);
                 break;
         }
     }
@@ -840,19 +844,32 @@ class GraphBuilder
         string $method,
         string $graphNodeType,
         string $dataSubtype,
+        ?CallChainEdge $traceEdge = null,
     ): void {
         $short = class_basename($fqcn);
-        $file = $this->resolveFile($fqcn);
+        $ownership = $this->methodOwnershipData($fqcn, $method, $traceEdge);
+        $file = $graphNodeType === 'validation_request'
+            ? $this->resolveFile($fqcn)
+            : $ownership['file'];
         $methodLocation = $this->findMethodNodeInChain($fqcn, $method);
         $flowSteps = $methodLocation !== null
             ? $this->flowExtractor->extract($methodLocation['methodNode'], $methodLocation['useMap'])
             : [];
         $svcMetrics = $this->extractMethodMetrics($fqcn, $method);
-        $validationRules = $this->validationRulesForFile($file);
+        $validationRules = $graphNodeType === 'validation_request'
+            ? $this->validationRulesForFile($this->resolveFile($fqcn))
+            : [];
+        $metadata = $ownership['metadata'];
+        if ($graphNodeType === 'validation_request') {
+            $metadata['ownerKind'] = 'form_request';
+            $metadata['sourceScope'] = 'application';
+            $metadata['subtype'] = 'validation_request';
+        }
         $this->graph->addNode(new Node($id, $graphNodeType, "{$short}@{$method}", [
             'fqcn' => $fqcn,
             'method' => $method,
-            'subtype' => $dataSubtype,
+            ...$metadata,
+            'subtype' => $metadata['subtype'] ?: $dataSubtype,
             'file' => $file,
             'flowSteps' => $flowSteps,
             'visibility' => $this->extractVisibility($fqcn, $method),
@@ -864,6 +881,88 @@ class GraphBuilder
         if ($methodLocation !== null && $methodLocation['declaringFqcn'] !== $fqcn) {
             $this->wireInheritedMethodDelegation($id, $methodLocation, $method);
         }
+    }
+
+    /**
+     * @return array{file:string,metadata:array{receiverFqcn:string,receiverFile:string,declaringFqcn:string,ownerKind:string,sourceScope:string,subtype:string}}
+     */
+    private function methodOwnershipData(string $fqcn, string $method, ?CallChainEdge $edge): array
+    {
+        $location = $this->findMethodNodeInChain($fqcn, $method);
+        $declaringFqcn = $edge?->declaringFqcn
+            ?: ($location['declaringFqcn'] ?? $fqcn);
+        $file = $this->resolveFile($declaringFqcn);
+        if ($file === '' && $location !== null) {
+            $file = $location['file'];
+        }
+
+        $sourceScope = $edge?->sourceScope ?: $this->sourceScopeForFile($declaringFqcn, $file);
+        $ownerKind = $edge?->ownerKind ?: $this->ownerKindForMethod($fqcn, $declaringFqcn, $sourceScope);
+        $subtype = $edge?->subtype ?: match ($ownerKind) {
+            'controller' => 'controller_method',
+            'form_request' => 'form_request_method',
+            'framework' => 'framework_method',
+            'package' => 'vendor_method',
+            'exception' => $method === '__construct' ? 'exception_constructor' : 'exception_method',
+            default => $ownerKind,
+        };
+
+        return [
+            'file' => $file,
+            'metadata' => [
+                'receiverFqcn' => $edge?->receiverFqcn ?: $fqcn,
+                'receiverFile' => $this->resolveFile($fqcn),
+                'declaringFqcn' => $declaringFqcn,
+                'ownerKind' => $ownerKind,
+                'sourceScope' => $sourceScope,
+                'subtype' => $subtype,
+            ],
+        ];
+    }
+
+    private function sourceScopeForFile(string $fqcn, string $file): string
+    {
+        if (str_starts_with($fqcn, 'Illuminate\\')
+            || str_starts_with($fqcn, 'Laravel\\')
+            || str_starts_with($fqcn, 'Symfony\\')) {
+            return 'framework';
+        }
+        $normalized = str_replace('\\', '/', $file);
+        $root = rtrim(str_replace('\\', '/', $this->projectRoot), '/');
+        if ($root !== '' && str_starts_with($normalized, $root.'/vendor/')) {
+            return 'vendor';
+        }
+        if ($root !== '' && str_starts_with($normalized, $root.'/')) {
+            return 'application';
+        }
+        if (str_contains($normalized, '/vendor/')) {
+            return 'vendor';
+        }
+
+        return $file === '' ? 'unknown' : 'application';
+    }
+
+    private function ownerKindForMethod(string $receiverFqcn, string $declaringFqcn, string $scope): string
+    {
+        if (str_contains($receiverFqcn, '\\Exceptions\\')
+            || str_ends_with($receiverFqcn, 'Exception')
+            || str_ends_with($receiverFqcn, 'Error')) {
+            return 'exception';
+        }
+        if ($scope === 'framework') {
+            return 'framework';
+        }
+        if ($scope === 'vendor') {
+            return 'package';
+        }
+        if (str_contains($receiverFqcn, '\\Http\\Requests\\')) {
+            return 'form_request';
+        }
+        if ($this->isController($receiverFqcn)) {
+            return 'controller';
+        }
+
+        return $this->classifyFqcn($declaringFqcn);
     }
 
     /**
@@ -948,7 +1047,7 @@ class GraphBuilder
     /**
      * Map traced edge types to graph node types (e.g. Form Request classes → validation_request).
      */
-    private function effectiveCalleeGraphType(string $fqcn, string $traceType): string
+    private function effectiveCalleeGraphType(string $fqcn, string $traceType, string $method = ''): string
     {
         if ($traceType !== 'service') {
             return $traceType;
@@ -959,7 +1058,10 @@ class GraphBuilder
         }
 
         $file = $this->resolveFile($fqcn);
-        if ($file !== '' && is_file($file) && $this->getValidationRulesExtractor()->hasNonAbstractRulesMethod($file)) {
+        if (in_array($method, ['validated', 'validate', 'rules'], true)
+            && $file !== ''
+            && is_file($file)
+            && $this->getValidationRulesExtractor()->hasNonAbstractRulesMethod($file)) {
             return 'validation_request';
         }
 
@@ -1174,6 +1276,11 @@ class GraphBuilder
             $parentType = $this->effectiveCalleeGraphType($declaringFqcn, $classified);
             $this->graph->addNode(new Node($parentNodeId, $parentType, "{$short}@{$method}", [
                 'fqcn' => $declaringFqcn,
+                'receiverFqcn' => $declaringFqcn,
+                'declaringFqcn' => $declaringFqcn,
+                'ownerKind' => $this->ownerKindForMethod($declaringFqcn, $declaringFqcn, $this->sourceScopeForFile($declaringFqcn, $methodLocation['file'])),
+                'sourceScope' => $this->sourceScopeForFile($declaringFqcn, $methodLocation['file']),
+                'subtype' => $this->sourceScopeForFile($declaringFqcn, $methodLocation['file']) === 'framework' ? 'framework_method' : $parentType,
                 'method' => $method,
                 'file' => $methodLocation['file'],
                 'members' => [],
@@ -1994,6 +2101,48 @@ class GraphBuilder
         $this->edgeIdOccurrence[$key] = $occurrence + 1;
     }
 
+    /** Add portable provenance while retaining the absolute `file` field. */
+    public function addRelativeSourcePaths(?Graph $graph = null): void
+    {
+        $graph ??= $this->graph;
+        $root = rtrim(str_replace('\\', '/', $this->projectRoot), '/');
+        if ($root === '') {
+            return;
+        }
+
+        foreach ($graph->nodes() as $node) {
+            $file = $node->data['file'] ?? null;
+            $data = $node->data;
+            if (is_string($file) && $file !== '') {
+                $relative = $this->relativeSourcePath($file, $root);
+                if ($relative !== null) {
+                    $data['relativeFile'] = $relative;
+                }
+            }
+            $receiverFile = $node->data['receiverFile'] ?? null;
+            if (is_string($receiverFile) && $receiverFile !== '') {
+                $relative = $this->relativeSourcePath($receiverFile, $root);
+                if ($relative !== null) {
+                    $data['relativeReceiverFile'] = $relative;
+                }
+            }
+            if ($data !== $node->data) {
+                $graph->updateNodeData($node->id, $data);
+            }
+        }
+    }
+
+    private function relativeSourcePath(string $file, string $root): ?string
+    {
+        $resolved = realpath($file);
+        $normalized = str_replace('\\', '/', $resolved !== false ? $resolved : $file);
+        if (! str_starts_with($normalized, $root.'/')) {
+            return null;
+        }
+
+        return substr($normalized, strlen($root) + 1);
+    }
+
     // ── Console commands ──────────────────────────────────────────────────────
 
     /**
@@ -2007,7 +2156,7 @@ class GraphBuilder
         $classToCmdId = [];
 
         foreach ($commands as $cmd) {
-            $id = "command::{$cmd->signature}";
+            $id = "command::{$cmd->canonicalName}";
             $flowSteps = [];
             $metrics = [];
             $hasN1 = false;
@@ -2020,12 +2169,16 @@ class GraphBuilder
             }
 
             if (! $this->graph->hasNode($id)) {
-                $this->graph->addNode(new Node($id, 'command', $cmd->signature, [
+                $this->graph->addNode(new Node($id, 'command', $cmd->canonicalName, [
                     'signature' => $cmd->signature,
+                    'canonicalName' => $cmd->canonicalName,
+                    'declaredSignature' => $cmd->declaredSignature,
                     'description' => $cmd->description,
                     'class' => $cmd->class,
                     'file' => $cmd->file,
                     'source' => $cmd->source,
+                    'sourceScope' => $cmd->sourceScope,
+                    'line' => $cmd->line,
                     'flowSteps' => $flowSteps,
                     'metrics' => $metrics ?: null,
                     'hasN1' => $hasN1,
@@ -2040,20 +2193,27 @@ class GraphBuilder
                 ?? $this->nodeIdForHop($edge->callerFqcn, $edge->callerMethod);
             $calleeNode = $this->hopCalleeNodeId($edge);
 
-            $calleeGraphType = $this->effectiveCalleeGraphType($edge->calleeFqcn, $edge->type);
-            $this->ensureNode($edge->calleeFqcn, $edge->calleeMethod, $calleeGraphType, []);
+            $calleeGraphType = $this->effectiveCalleeGraphType($edge->calleeFqcn, $edge->type, $edge->calleeMethod);
+            $this->ensureNode($edge->calleeFqcn, $edge->calleeMethod, $calleeGraphType, [], $edge);
 
             if (! $this->graph->hasNode($callerNode) && ! isset($classToCmdId[$edge->callerFqcn])) {
                 $callerClassified = $this->classifyFqcn($edge->callerFqcn);
-                $callerGraphType = $this->effectiveCalleeGraphType($edge->callerFqcn, $callerClassified);
+                $callerGraphType = $this->effectiveCalleeGraphType($edge->callerFqcn, $callerClassified, $edge->callerMethod);
                 $this->ensureNode($edge->callerFqcn, $edge->callerMethod, $callerGraphType, []);
             }
 
-            $this->addEdge($callerNode, $calleeNode, $this->edgeLabelForType($calleeGraphType), 'command-to-'.$calleeGraphType);
+            $callerKind = isset($classToCmdId[$edge->callerFqcn])
+                ? 'command'
+                : $this->classifyFqcn($edge->callerFqcn);
+            $this->addEdge($callerNode, $calleeNode, $this->edgeLabelForType($calleeGraphType), $callerKind.'-to-'.$calleeGraphType);
         }
 
         foreach ($schedules as $entry) {
-            $schedId = 'schedule::'.md5($entry->type.$entry->target.$entry->frequency);
+            $schedId = $entry->graphId();
+
+            if ($entry->type === 'job' && $entry->targetResolution === 'local') {
+                $this->ensureNode($entry->canonicalTarget, 'handle', 'job', []);
+            }
 
             if (! $this->graph->hasNode($schedId)) {
                 $label = $entry->frequency
@@ -2063,17 +2223,34 @@ class GraphBuilder
                 $this->graph->addNode(new Node($schedId, 'schedule', $label, [
                     'type' => $entry->type,
                     'target' => $entry->target,
+                    'canonicalTarget' => $entry->canonicalTarget,
+                    'rawInvocation' => $entry->rawInvocation,
+                    'invocationArguments' => $entry->invocationArguments,
+                    'invocationOptions' => $entry->invocationOptions,
+                    'targetArguments' => $entry->targetArguments,
                     'frequency' => $entry->frequency,
+                    'cadence' => $entry->frequency,
+                    'cadenceArguments' => $entry->cadenceArguments,
+                    'cronExpression' => $entry->cronExpression,
+                    'modifiers' => $entry->modifiers,
+                    'targetResolution' => $entry->targetResolution,
+                    'targetClass' => $entry->targetClass,
+                    'sourceScope' => $entry->sourceScope,
                     'file' => $entry->file,
+                    'line' => $entry->line,
                 ]));
             }
 
             // Edge: schedule → command/job node if it exists
-            $targetId = "command::{$entry->target}";
+            $targetId = $entry->type === 'job'
+                ? $this->nodeIdForHop($entry->canonicalTarget, 'handle')
+                : "command::{$entry->canonicalTarget}";
             if ($this->graph->hasNode($targetId)) {
-                $this->addEdge($schedId, $targetId, 'runs', 'schedule-to-command');
+                $this->addEdge($schedId, $targetId, 'runs', 'schedule-to-'.$entry->type);
             }
         }
+
+        $this->addRelativeSourcePaths();
     }
 
     // ── Filament page call chains ─────────────────────────────────────────────
@@ -2103,14 +2280,14 @@ class GraphBuilder
 
             $calleeNode = $this->hopCalleeNodeId($edge);
 
-            $calleeGraphType = $this->effectiveCalleeGraphType($edge->calleeFqcn, $edge->type);
+            $calleeGraphType = $this->effectiveCalleeGraphType($edge->calleeFqcn, $edge->type, $edge->calleeMethod);
             // Ensure callee node exists (model, service, job, event, etc.)
-            $this->ensureNode($edge->calleeFqcn, $edge->calleeMethod, $calleeGraphType, []);
+            $this->ensureNode($edge->calleeFqcn, $edge->calleeMethod, $calleeGraphType, [], $edge);
 
             // For intermediate service/repo callers in deep chains
             if (! $this->graph->hasNode($callerNode) && ! isset($pageNodeIds[$edge->callerFqcn])) {
                 $callerClassified = $this->classifyFqcn($edge->callerFqcn);
-                $callerGraphType = $this->effectiveCalleeGraphType($edge->callerFqcn, $callerClassified);
+                $callerGraphType = $this->effectiveCalleeGraphType($edge->callerFqcn, $callerClassified, $edge->callerMethod);
                 $this->ensureNode($edge->callerFqcn, $edge->callerMethod, $callerGraphType, []);
             }
 
@@ -2163,12 +2340,12 @@ class GraphBuilder
                 ?? $this->nodeIdForHop($edge->callerFqcn, $edge->callerMethod);
             $calleeNode = $this->hopCalleeNodeId($edge);
 
-            $calleeGraphType = $this->effectiveCalleeGraphType($edge->calleeFqcn, $edge->type);
-            $this->ensureNode($edge->calleeFqcn, $edge->calleeMethod, $calleeGraphType, []);
+            $calleeGraphType = $this->effectiveCalleeGraphType($edge->calleeFqcn, $edge->type, $edge->calleeMethod);
+            $this->ensureNode($edge->calleeFqcn, $edge->calleeMethod, $calleeGraphType, [], $edge);
 
             if (! $this->graph->hasNode($callerNode) && ! isset($classToChannelId[$edge->callerFqcn])) {
                 $callerClassified = $this->classifyFqcn($edge->callerFqcn);
-                $callerGraphType = $this->effectiveCalleeGraphType($edge->callerFqcn, $callerClassified);
+                $callerGraphType = $this->effectiveCalleeGraphType($edge->callerFqcn, $callerClassified, $edge->callerMethod);
                 $this->ensureNode($edge->callerFqcn, $edge->callerMethod, $callerGraphType, []);
             }
 

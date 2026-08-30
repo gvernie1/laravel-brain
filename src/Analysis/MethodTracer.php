@@ -69,6 +69,9 @@ class MethodTracer
     /** @var array<string, 'enum'|'interface'|'trait'|'abstract_class'|null> */
     private array $declKindCache = [];
 
+    /** @var array<string, bool> */
+    private array $eloquentModelCache = [];
+
     /** Marker hop type for a dispatch verb whose job argument can't be resolved statically. */
     public const UNRESOLVED_DISPATCH = 'unresolved-dispatch';
 
@@ -119,8 +122,7 @@ class MethodTracer
      */
     public function traceMethod(string $fqcn, string $method, array $psr4Map = [], string $projectRoot = ''): array
     {
-        $this->psr4Map = $psr4Map;
-        $this->projectRoot = $projectRoot;
+        $this->initializeContext($psr4Map, $projectRoot);
         $this->visited = [];
         // Keep classCache across calls for efficiency when tracing many classes
 
@@ -146,8 +148,7 @@ class MethodTracer
         array $psr4Map = [],
         string $projectRoot = ''
     ): array {
-        $this->psr4Map = $psr4Map;
-        $this->projectRoot = $projectRoot;
+        $this->initializeContext($psr4Map, $projectRoot);
 
         $discovered = $this->scanMethod($closure, [], $useMap, $callerFqcn, null);
 
@@ -158,14 +159,7 @@ class MethodTracer
 
                 continue;
             }
-            $edges[] = new CallChainEdge(
-                callerFqcn: $callerFqcn,
-                callerMethod: '__invoke',
-                calleeFqcn: $hop['fqcn'],
-                calleeMethod: $hop['method'],
-                type: $hop['type'],
-                visibility: $hop['visibility'],
-            );
+            $edges[] = $this->edgeForHop($callerFqcn, '__invoke', $hop);
 
             if (in_array($hop['type'], ['service', 'repository', 'action', 'job', 'mail', 'notification', 'abstract_class', 'resource'], true)) {
                 $subEdges = $this->traceDeep($hop['fqcn'], $hop['method'], depth: 1);
@@ -186,8 +180,7 @@ class MethodTracer
      */
     public function trace(array $controllers, array $psr4Map = [], string $projectRoot = ''): array
     {
-        $this->psr4Map = $psr4Map;
-        $this->projectRoot = $projectRoot;
+        $this->initializeContext($psr4Map, $projectRoot);
         $this->visited = [];
         $this->classCache = [];
         // NB: unresolvedDispatchers is NOT reset here. trace() runs more than once per analysis
@@ -227,14 +220,7 @@ class MethodTracer
 
                         continue;
                     }
-                    $edges[] = new CallChainEdge(
-                        callerFqcn: $controller->fqcn,
-                        callerMethod: $methodDef->name,
-                        calleeFqcn: $hop['fqcn'],
-                        calleeMethod: $hop['method'],
-                        type: $hop['type'],
-                        visibility: $hop['visibility'],
-                    );
+                    $edges[] = $this->edgeForHop($controller->fqcn, $methodDef->name, $hop);
 
                     // Recurse into non-leaf hops (services, repositories)
                     if (in_array($hop['type'], ['service', 'repository', 'action', 'job', 'mail', 'notification', 'abstract_class', 'resource'], true)) {
@@ -319,14 +305,7 @@ class MethodTracer
 
                 continue;
             }
-            $edges[] = new CallChainEdge(
-                callerFqcn: $fqcn,
-                callerMethod: $method,
-                calleeFqcn: $hop['fqcn'],
-                calleeMethod: $hop['method'],
-                type: $hop['type'],
-                visibility: $hop['visibility'],
-            );
+            $edges[] = $this->edgeForHop($fqcn, $method, $hop);
 
             if (in_array($hop['type'], ['service', 'repository', 'action', 'job', 'mail', 'notification', 'abstract_class', 'resource'], true)) {
                 $subEdges = $this->traceDeep($hop['fqcn'], $hop['method'], $depth + 1);
@@ -337,6 +316,176 @@ class MethodTracer
         }
 
         return $edges;
+    }
+
+    /**
+     * @param  array{fqcn:string,method:string,type:string,visibility:string}  $hop
+     */
+    private function edgeForHop(string $callerFqcn, string $callerMethod, array $hop): CallChainEdge
+    {
+        $ownership = $this->methodOwnership($hop['fqcn'], $hop['method'], $hop['type']);
+
+        return new CallChainEdge(
+            callerFqcn: $callerFqcn,
+            callerMethod: $callerMethod,
+            calleeFqcn: $hop['fqcn'],
+            calleeMethod: $hop['method'],
+            type: $hop['type'],
+            visibility: $hop['visibility'],
+            receiverFqcn: $hop['fqcn'],
+            declaringFqcn: $ownership['declaringFqcn'],
+            ownerKind: $ownership['ownerKind'],
+            sourceScope: $ownership['sourceScope'],
+            subtype: $ownership['subtype'],
+        );
+    }
+
+    /**
+     * Resolve a call-site receiver separately from the method declaration it reaches.
+     *
+     * @return array{declaringFqcn:string,ownerKind:string,sourceScope:string,subtype:string}
+     */
+    private function methodOwnership(string $receiverFqcn, string $method, string $traceType): array
+    {
+        $declaringFqcn = $this->declaringFqcnForMethod($receiverFqcn, $method) ?? $receiverFqcn;
+        $sourceScope = $this->sourceScopeFor($declaringFqcn);
+        $isException = $this->isThrowableType($receiverFqcn);
+        $isFormRequest = $this->isFormRequestType($receiverFqcn);
+
+        if ($isException) {
+            $ownerKind = 'exception';
+            $subtype = $method === '__construct' ? 'exception_constructor' : 'exception_method';
+        } elseif ($sourceScope === 'framework') {
+            $ownerKind = 'framework';
+            $subtype = 'framework_method';
+        } elseif ($sourceScope === 'vendor') {
+            $ownerKind = 'package';
+            $subtype = 'vendor_method';
+        } elseif ($isFormRequest) {
+            $ownerKind = 'form_request';
+            $subtype = 'form_request_method';
+        } elseif (str_contains($receiverFqcn, 'Controller') || str_contains($receiverFqcn, '\\Http\\Controllers\\')) {
+            $ownerKind = 'controller';
+            $subtype = 'controller_method';
+        } else {
+            $ownerKind = match ($traceType) {
+                'action' => 'http_component',
+                'abstract_class' => 'abstract_class',
+                default => $traceType,
+            };
+            $subtype = $traceType === 'model' ? 'eloquent_operation' : $traceType;
+        }
+
+        return compact('declaringFqcn', 'ownerKind', 'sourceScope', 'subtype');
+    }
+
+    private function declaringFqcnForMethod(string $fqcn, string $method): ?string
+    {
+        $current = $fqcn;
+        for ($depth = 0; $depth <= 8 && $current !== ''; $depth++) {
+            $info = $this->loadClass($current);
+            if ($info !== null) {
+                if (isset($info['methods'][$method])) {
+                    return $current;
+                }
+                $current = $info['parent'] ?? '';
+
+                continue;
+            }
+
+            break;
+        }
+
+        try {
+            if (class_exists($fqcn) || interface_exists($fqcn) || trait_exists($fqcn)) {
+                $reflection = new \ReflectionClass($fqcn);
+                if ($reflection->hasMethod($method)) {
+                    return $reflection->getMethod($method)->getDeclaringClass()->getName();
+                }
+            }
+        } catch (\ReflectionException) {
+            // Static ownership remains unknown; the receiver is retained as the safe fallback.
+        }
+
+        return null;
+    }
+
+    private function sourceScopeFor(string $fqcn): string
+    {
+        if ($this->isFrameworkFqcn($fqcn)) {
+            return 'framework';
+        }
+
+        $file = $this->resolveFile($fqcn);
+        if ($file !== null) {
+            $normalized = str_replace('\\', '/', $file);
+            $root = rtrim(str_replace('\\', '/', $this->projectRoot), '/');
+            if ($root !== '' && str_starts_with($normalized, $root.'/vendor/')) {
+                return 'vendor';
+            }
+            if ($root !== '' && str_starts_with($normalized, $root.'/')) {
+                return 'application';
+            }
+            if (str_contains($normalized, '/vendor/')) {
+                return 'vendor';
+            }
+        }
+
+        if ($this->isThrowableType($fqcn) || in_array($fqcn, ['Throwable', 'Exception', 'Error'], true)) {
+            return 'runtime';
+        }
+
+        return 'unknown';
+    }
+
+    private function isFrameworkFqcn(string $fqcn): bool
+    {
+        return str_starts_with($fqcn, 'Illuminate\\')
+            || str_starts_with($fqcn, 'Laravel\\')
+            || str_starts_with($fqcn, 'Symfony\\');
+    }
+
+    private function isFormRequestType(string $fqcn): bool
+    {
+        if (str_contains($fqcn, '\\Http\\Requests\\')) {
+            return true;
+        }
+
+        return $this->classExtends($fqcn, 'Illuminate\\Foundation\\Http\\FormRequest');
+    }
+
+    private function isThrowableType(string $fqcn): bool
+    {
+        if (in_array(ltrim($fqcn, '\\'), ['Throwable', 'Exception', 'Error', 'RuntimeException', 'LogicException'], true)
+            || str_contains($fqcn, '\\Exceptions\\')
+            || str_ends_with($fqcn, 'Exception')
+            || str_ends_with($fqcn, 'Error')) {
+            return true;
+        }
+
+        return $this->classExtends($fqcn, 'Throwable');
+    }
+
+    private function classExtends(string $fqcn, string $ancestor): bool
+    {
+        $current = ltrim($fqcn, '\\');
+        $ancestor = ltrim($ancestor, '\\');
+        for ($depth = 0; $depth <= 12 && $current !== ''; $depth++) {
+            if ($current === $ancestor) {
+                return true;
+            }
+            $info = $this->loadClass($current);
+            if ($info === null) {
+                break;
+            }
+            $current = $info['parent'] ?? '';
+        }
+
+        try {
+            return (class_exists($fqcn) || interface_exists($fqcn)) && is_a($fqcn, $ancestor, true);
+        } catch (\Throwable) {
+            return false;
+        }
     }
 
     /**
@@ -366,8 +515,6 @@ class MethodTracer
             private string $currentFqcn;
 
             private ?string $parentFqcn;
-
-            private const MODEL_NAMESPACES = ['App\\Models\\', 'App\\Model\\', 'Models\\'];
 
             private const EVENT_FUNCTIONS = ['event'];
 
@@ -990,17 +1137,7 @@ class MethodTracer
 
             private function looksLikeModel(string $class): bool
             {
-                // Covers App\Models\, Modules\Blog\Models\, any \Models\ or \Model\ segment
-                if (str_contains($class, '\\Models\\') || str_contains($class, '\\Model\\')) {
-                    return true;
-                }
-                foreach (self::MODEL_NAMESPACES as $ns) {
-                    if (str_starts_with($class, $ns)) {
-                        return true;
-                    }
-                }
-
-                return ! str_contains($class, '\\') && ctype_upper($class[0] ?? '');
+                return $this->tracer->isEloquentModel($class);
             }
 
             private function looksLikeJob(string $class): bool
@@ -1057,6 +1194,54 @@ class MethodTracer
     }
 
     // ─── Class file loader ────────────────────────────────────────────────────
+
+    private function initializeContext(array $psr4Map, string $projectRoot): void
+    {
+        $projectRoot = rtrim($projectRoot, '/');
+        if ($this->projectRoot !== '' && $this->projectRoot !== $projectRoot) {
+            $this->classCache = [];
+            $this->declKindCache = [];
+            $this->eloquentModelCache = [];
+        }
+        $this->projectRoot = $projectRoot;
+        $this->psr4Map = $psr4Map;
+
+        $autoloadFile = $this->projectRoot.'/vendor/composer/autoload_psr4.php';
+        if (! is_file($autoloadFile)) {
+            return;
+        }
+
+        $vendorMap = require $autoloadFile;
+        if (! is_array($vendorMap)) {
+            return;
+        }
+        foreach ($vendorMap as $namespace => $paths) {
+            $namespace = rtrim((string) $namespace, '\\');
+            foreach ((array) $paths as $path) {
+                if (is_string($path) && $path !== '') {
+                    $this->psr4Map[$namespace][] = rtrim($path, '/');
+                }
+            }
+            $this->psr4Map[$namespace] = array_values(array_unique($this->psr4Map[$namespace] ?? []));
+        }
+    }
+
+    /**
+     * Model classification requires actual Eloquent ancestry, not an operation-like method name
+     * or a capitalized short class name.
+     */
+    public function isEloquentModel(string $fqcn): bool
+    {
+        $fqcn = ltrim($fqcn, '\\');
+        if ($fqcn === '' || $fqcn === 'Illuminate\\Database\\Eloquent\\Model') {
+            return false;
+        }
+
+        return $this->eloquentModelCache[$fqcn] ??= $this->classExtends(
+            $fqcn,
+            'Illuminate\\Database\\Eloquent\\Model',
+        );
+    }
 
     /**
      * Load a class by FQCN, parse it, and return:

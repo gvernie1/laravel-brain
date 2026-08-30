@@ -130,14 +130,14 @@ class GraphSplitter
 
         // ── Console command tabs ───────────────────────────────────────────────
         foreach ($commands as $cmd) {
-            $tabId = $this->sanitizeId('cmd '.$cmd->signature);
-            $seedId = "command::{$cmd->signature}";
+            $tabId = $this->sanitizeId('cmd '.$cmd->canonicalName);
+            $seedId = "command::{$cmd->canonicalName}";
             $subgraph = $this->extractSubgraphForward($fullGraph, $fwdAdj, [$seedId], $projectName, $analyzedAt);
             $subgraphs[$tabId] = $subgraph;
 
             $manifest[] = new TabManifestEntry(
                 id: $tabId,
-                label: $cmd->signature,
+                label: $cmd->canonicalName,
                 routeCount: 1,
                 nodeCount: $subgraph->nodeCount(),
                 edgeCount: $subgraph->edgeCount(),
@@ -171,7 +171,7 @@ class GraphSplitter
             $scheduleFile = $schedules[0]->file ?? '';
             $seeds = [];
             foreach ($schedules as $entry) {
-                $seeds[] = 'schedule::'.md5($entry->type.$entry->target.$entry->frequency);
+                $seeds[] = $entry->graphId();
             }
             $tabId = 'schedule--tasks';
             $subgraph = $this->extractSubgraphForward($fullGraph, $fwdAdj, $seeds, $projectName, $analyzedAt);
@@ -320,7 +320,7 @@ class GraphSplitter
      * @param  array<string, ModelDefinition>  $models
      * @return array{id: string, graph: Graph, manifest: TabManifestEntry}|null
      */
-    public function buildErdTab(array $models, string $projectName, string $analyzedAt): ?array
+    public function buildErdTab(array $models, string $projectName, string $analyzedAt, string $projectRoot = ''): ?array
     {
         if (empty($models)) {
             return null;
@@ -337,6 +337,7 @@ class GraphSplitter
         foreach ($models as $fqcn => $def) {
             $nodeId = "model::{$fqcn}";
             $present[$fqcn] = $nodeId;
+            $relativeFile = $this->relativeSourceFile($def->file, $projectRoot);
             $graph->addNode(new Node(
                 id: $nodeId,
                 type: 'model',
@@ -344,6 +345,9 @@ class GraphSplitter
                 data: [
                     'fqcn' => $fqcn,
                     'file' => $def->file,
+                    ...($relativeFile !== null
+                        ? ['relativeFile' => $relativeFile]
+                        : []),
                     'erd' => [
                         'table' => $def->table,
                         'primaryKey' => $def->primaryKey,
@@ -668,6 +672,22 @@ class GraphSplitter
         }
 
         return basename($fullPath);
+    }
+
+    private function relativeSourceFile(string $file, string $projectRoot): ?string
+    {
+        if ($file === '' || $projectRoot === '') {
+            return null;
+        }
+        $resolvedFile = realpath($file);
+        $resolvedRoot = realpath($projectRoot);
+        $normalizedFile = str_replace('\\', '/', $resolvedFile !== false ? $resolvedFile : $file);
+        $normalizedRoot = rtrim(str_replace('\\', '/', $resolvedRoot !== false ? $resolvedRoot : $projectRoot), '/');
+        if (! str_starts_with($normalizedFile, $normalizedRoot.'/')) {
+            return null;
+        }
+
+        return substr($normalizedFile, strlen($normalizedRoot) + 1);
     }
 
     private function sanitizeId(string $group): string

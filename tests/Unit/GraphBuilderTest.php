@@ -14,7 +14,7 @@ it('builds a graph with nodes and edges from fixture project', function () {
     $routes = (new RouteAnalyzer)->analyze(fixture('laravel-project'));
     $middlewareRegistry = new MiddlewareRegistry([], [], []);
     $controllers = (new ControllerAnalyzer)->analyze(fixture('laravel-project'), $routes);
-    $traces = (new MethodTracer)->trace($controllers);
+    $traces = (new MethodTracer)->trace($controllers, [], fixture('laravel-project'));
     $modelFqcns = array_map(fn ($t) => $t->calleeFqcn, array_filter($traces, fn ($t) => $t->type === 'model'));
     $models = (new ModelAnalyzer)->analyze(fixture('laravel-project'), $modelFqcns);
 
@@ -28,7 +28,7 @@ it('produces valid JSON output', function () {
     $routes = (new RouteAnalyzer)->analyze(fixture('laravel-project'));
     $middlewareRegistry = new MiddlewareRegistry([], [], []);
     $controllers = (new ControllerAnalyzer)->analyze(fixture('laravel-project'), $routes);
-    $traces = (new MethodTracer)->trace($controllers);
+    $traces = (new MethodTracer)->trace($controllers, [], fixture('laravel-project'));
 
     $modelFqcns = array_map(fn ($t) => $t->calleeFqcn, array_filter($traces, fn ($t) => $t->type === 'model'));
     $models = (new ModelAnalyzer)->analyze(fixture('laravel-project'), $modelFqcns);
@@ -47,7 +47,7 @@ it('creates route nodes for each route', function () {
     $routes = (new RouteAnalyzer)->analyze(fixture('laravel-project'));
     $middlewareRegistry = new MiddlewareRegistry([], [], []);
     $controllers = (new ControllerAnalyzer)->analyze(fixture('laravel-project'), $routes);
-    $traces = (new MethodTracer)->trace($controllers);
+    $traces = (new MethodTracer)->trace($controllers, [], fixture('laravel-project'));
     $models = [];
 
     $graph = (new GraphBuilder)->build('test', $routes, $middlewareRegistry, $controllers, $traces, $models);
@@ -61,7 +61,7 @@ it('exposes parent controller nodes and extends edges for inherited actions', fu
     $routes = (new RouteAnalyzer)->analyze(fixture('laravel-project'));
     $middlewareRegistry = new MiddlewareRegistry([], [], []);
     $controllers = (new ControllerAnalyzer)->analyze(fixture('laravel-project'), $routes);
-    $traces = (new MethodTracer)->trace($controllers);
+    $traces = (new MethodTracer)->trace($controllers, [], fixture('laravel-project'));
     $models = [];
 
     $graph = (new GraphBuilder)->build('test', $routes, $middlewareRegistry, $controllers, $traces, $models, fixture('laravel-project'));
@@ -156,7 +156,7 @@ it('assigns content-addressed edge ids that are stable across rebuilds (graph fo
         $routes = (new RouteAnalyzer)->analyze(fixture('laravel-project'));
         $middlewareRegistry = new MiddlewareRegistry([], [], []);
         $controllers = (new ControllerAnalyzer)->analyze(fixture('laravel-project'), $routes);
-        $traces = (new MethodTracer)->trace($controllers);
+        $traces = (new MethodTracer)->trace($controllers, [], fixture('laravel-project'));
         $modelFqcns = array_map(fn ($t) => $t->calleeFqcn, array_filter($traces, fn ($t) => $t->type === 'model'));
         $models = (new ModelAnalyzer)->analyze(fixture('laravel-project'), $modelFqcns);
 
@@ -185,7 +185,7 @@ it('keeps every existing edge id when a new edge appears', function () {
         $routes = (new RouteAnalyzer)->analyze(fixture('laravel-project'));
         $middlewareRegistry = new MiddlewareRegistry([], [], []);
         $controllers = (new ControllerAnalyzer)->analyze(fixture('laravel-project'), $routes);
-        $traces = (new MethodTracer)->trace($controllers);
+        $traces = (new MethodTracer)->trace($controllers, [], fixture('laravel-project'));
         $modelFqcns = array_map(fn ($t) => $t->calleeFqcn, array_filter($traces, fn ($t) => $t->type === 'model'));
         $models = (new ModelAnalyzer)->analyze(fixture('laravel-project'), $modelFqcns);
 
@@ -200,6 +200,8 @@ it('keeps every existing edge id when a new edge appears', function () {
     // are certain to exist and only the edge is new.
     $traces = (new MethodTracer)->trace(
         (new ControllerAnalyzer)->analyze(fixture('laravel-project'), (new RouteAnalyzer)->analyze(fixture('laravel-project'))),
+        [],
+        fixture('laravel-project'),
     );
     $after = array_map(fn ($e) => $e['id'], json_decode($build([$traces[0]])->toJson(), true)['edges']);
 

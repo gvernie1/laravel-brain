@@ -130,7 +130,7 @@ it('resolves a same-namespace model named in authorize()', function () {
         'Models/Invoice.php' => '<?php
 namespace App\Models;
 
-class Invoice {}',
+class Invoice extends \Illuminate\Database\Eloquent\Model {}',
         'Models/Guarded.php' => '<?php
 namespace App\Models;
 
@@ -195,13 +195,8 @@ class Importer
 });
 
 it('treats a same-namespace authorize() target the same as an imported one', function () {
-    // authorize() only records a target that looksLikeModel() accepts, and that helper takes any
-    // bare capitalised word. A model outside the conventional namespaces was therefore accepted
-    // while it stayed short and is rejected once resolved — so this call records nothing now.
-    //
-    // That is the invariant applied downwards rather than a new gap: written as an import, the
-    // qualified name fails the same check on main today. What is pinned here is that both forms
-    // agree; whether looksLikeModel() should recognise the class at all is a separate question.
+    // Neither spelling supplies Eloquent ancestry, so both must remain ordinary application
+    // classes rather than becoming models because of a short-name or namespace heuristic.
     $root = sameNsProject([
         'Domain/Billing/Invoice.php' => '<?php
 namespace App\Domain\Billing;

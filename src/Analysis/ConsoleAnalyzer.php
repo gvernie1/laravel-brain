@@ -8,6 +8,7 @@ use LaraMint\LaravelBrain\Parser\PhpFileParser;
 use PhpParser\Node;
 use PhpParser\NodeTraverser;
 use PhpParser\NodeVisitorAbstract;
+use PhpParser\PrettyPrinter\Standard;
 
 class ConsoleCommandDefinition
 {
@@ -17,7 +18,16 @@ class ConsoleCommandDefinition
         public string $class,       // FQCN for class-based, '' for closures
         public string $file,
         public string $source,      // 'route' | 'class' | 'kernel'
-    ) {}
+        public string $canonicalName = '',
+        public string $declaredSignature = '',
+        public string $sourceScope = 'application',
+        public ?int $line = null,
+    ) {
+        $this->declaredSignature = $this->declaredSignature !== '' ? $this->declaredSignature : $this->signature;
+        $this->canonicalName = $this->canonicalName !== ''
+            ? $this->canonicalName
+            : ConsoleAnalyzer::canonicalCommandName($this->declaredSignature);
+    }
 }
 
 class ScheduleEntry
@@ -27,11 +37,68 @@ class ScheduleEntry
         public string $target,      // command signature or job FQCN
         public string $frequency,   // 'daily' | 'hourly' | etc.
         public string $file,
-    ) {}
+        /** @var list<mixed> */
+        public array $cadenceArguments = [],
+        public ?string $cronExpression = null,
+        /** @var list<array{method:string,arguments:list<mixed>}> */
+        public array $modifiers = [],
+        public string $rawInvocation = '',
+        public string $canonicalTarget = '',
+        /** @var list<mixed> */
+        public array $invocationArguments = [],
+        /** @var list<mixed> */
+        public array $invocationOptions = [],
+        /** @var list<mixed>|array<string,mixed> */
+        public array $targetArguments = [],
+        public ?int $line = null,
+        public string $targetResolution = 'unresolved',
+        public ?string $targetClass = null,
+        public string $sourceScope = 'unknown',
+    ) {
+        $this->rawInvocation = $this->rawInvocation !== '' ? $this->rawInvocation : $this->target;
+        $this->canonicalTarget = $this->canonicalTarget !== ''
+            ? $this->canonicalTarget
+            : ($this->type === 'command' ? ConsoleAnalyzer::canonicalCommandName($this->target) : $this->target);
+    }
+
+    public function graphId(): string
+    {
+        $hasStructuredIdentity = $this->cadenceArguments !== []
+            || $this->modifiers !== []
+            || $this->targetArguments !== []
+            || $this->rawInvocation !== $this->target
+            || $this->canonicalTarget !== $this->target;
+
+        if (! $hasStructuredIdentity) {
+            return 'schedule::'.md5($this->type.$this->target.$this->frequency);
+        }
+
+        return 'schedule::'.md5((string) json_encode([
+            $this->type,
+            $this->canonicalTarget,
+            $this->rawInvocation,
+            $this->targetArguments,
+            $this->frequency,
+            $this->cadenceArguments,
+            $this->modifiers,
+        ], JSON_UNESCAPED_SLASHES));
+    }
 }
 
 class ConsoleAnalyzer
 {
+    private const CADENCE_METHODS = [
+        'everySecond', 'everyTwoSeconds', 'everyFiveSeconds', 'everyTenSeconds',
+        'everyFifteenSeconds', 'everyTwentySeconds', 'everyThirtySeconds',
+        'everyMinute', 'everyTwoMinutes', 'everyThreeMinutes', 'everyFourMinutes',
+        'everyFiveMinutes', 'everyTenMinutes', 'everyFifteenMinutes', 'everyThirtyMinutes',
+        'hourly', 'hourlyAt', 'everyOddHour', 'everyTwoHours', 'everyThreeHours',
+        'everyFourHours', 'everySixHours', 'daily', 'dailyAt', 'twiceDaily',
+        'twiceDailyAt', 'weekly', 'weeklyOn', 'monthly', 'monthlyOn',
+        'twiceMonthly', 'lastDayOfMonth', 'quarterly', 'quarterlyOn',
+        'yearly', 'yearlyOn', 'cron',
+    ];
+
     private PhpFileParser $parser;
 
     /** @var string[] */
@@ -95,9 +162,16 @@ class ConsoleAnalyzer
             }
         }
 
+        // Laravel 11+ may register schedules directly in bootstrap/app.php via withSchedule().
+        // The same fluent-chain parser works there without introducing a separate subsystem.
+        $bootstrap = $root.'/bootstrap/app.php';
+        if (is_file($bootstrap)) {
+            $schedule = array_merge($schedule, $this->parseScheduleFile($bootstrap));
+        }
+
         // Deduplicate: class/route-sourced entries win over kernel entries.
         // Kernel.php usually re-lists classes already found in Commands/.
-        // Index by signature only — one canonical entry per signature.
+        // Index by canonical command name. The declared signature remains available separately.
         $bySignature = [];
         $byFqcn = [];
 
@@ -106,7 +180,7 @@ class ConsoleAnalyzer
             if ($cmd->source === 'kernel') {
                 continue;
             }
-            $bySignature[$cmd->signature] = $cmd;
+            $bySignature[$cmd->canonicalName] = $cmd;
             if ($cmd->class) {
                 $byFqcn[$cmd->class] = $cmd;
             }
@@ -120,13 +194,27 @@ class ConsoleAnalyzer
             if (isset($byFqcn[$cmd->class]) || isset($byFqcn[$cmd->signature])) {
                 continue;
             }
-            if (isset($bySignature[$cmd->signature])) {
+            $classFile = $this->resolveApplicationClassFile($cmd->class, $root);
+            if ($classFile === null) {
+                // A kernel registration alone does not prove a local implementation. Package
+                // and unresolved commands stay schedule metadata rather than fake app nodes.
                 continue;
             }
-            $bySignature[$cmd->signature] = $cmd;
+            $parsed = $this->parser->parse($classFile);
+            $resolved = $parsed['ast'] !== null
+                ? $this->extractCommandDefinition($parsed['ast'], $classFile)
+                : null;
+            if ($resolved === null || isset($bySignature[$resolved->canonicalName])) {
+                continue;
+            }
+            $resolved->source = 'kernel';
+            $bySignature[$resolved->canonicalName] = $resolved;
         }
 
-        return ['commands' => array_values($bySignature), 'schedule' => $schedule];
+        $commands = array_values($bySignature);
+        $this->resolveScheduleTargets($schedule, $commands, $root);
+
+        return ['commands' => $commands, 'schedule' => $schedule];
     }
 
     // ── Console route file ────────────────────────────────────────────────────
@@ -159,11 +247,11 @@ class ConsoleAnalyzer
                     return null;
                 }
 
-                $class = $node->class->getLast();
+                $class = PhpFileParser::resolvedName($node->class) ?? $node->class->toString();
                 $method = $node->name instanceof Node\Identifier ? $node->name->toString() : null;
 
                 // Artisan::command('signature', closure)
-                if ($class === 'Artisan' && $method === 'command') {
+                if ($class === 'Illuminate\\Support\\Facades\\Artisan' && $method === 'command') {
                     $sig = $this->strArg($node->args[0] ?? null);
                     if ($sig !== null) {
                         $this->commands[] = new ConsoleCommandDefinition(
@@ -172,32 +260,12 @@ class ConsoleAnalyzer
                             class: '',
                             file: $this->file,
                             source: 'route',
-                        );
-                    }
-                }
-
-                // Schedule::command('sig')->daily()
-                if ($class === 'Schedule' && $method === 'command') {
-                    $sig = $this->strArg($node->args[0] ?? null);
-                    $freq = $this->walkChainForFrequency($node);
-                    if ($sig !== null) {
-                        $this->schedule[] = new ScheduleEntry(
-                            type: 'command',
-                            target: $sig,
-                            frequency: $freq,
-                            file: $this->file,
+                            line: $node->getStartLine(),
                         );
                     }
                 }
 
                 return null;
-            }
-
-            private function walkChainForFrequency(Node $node): string
-            {
-                // Walk up the parent chain looking for frequency method names
-                // The AST has the parent as the receiver of subsequent method calls
-                return '';
             }
 
             private function strArg(?Node $node): ?string
@@ -214,7 +282,7 @@ class ConsoleAnalyzer
         $traverser->addVisitor($visitor);
         $traverser->traverse($parsed['ast']);
 
-        return ['commands' => $visitor->commands, 'schedule' => $visitor->schedule];
+        return ['commands' => $visitor->commands, 'schedule' => $this->scheduleEntriesFromAst($parsed['ast'], $file, $parsed['useMap'] ?? [])];
     }
 
     // ── Command classes ───────────────────────────────────────────────────────
@@ -260,6 +328,8 @@ class ConsoleAnalyzer
 
             private ?string $description = null;
 
+            private ?int $line = null;
+
             public function __construct(private string $file) {}
 
             public function enterNode(Node $node): ?int
@@ -269,6 +339,22 @@ class ConsoleAnalyzer
                 }
                 if ($node instanceof Node\Stmt\Class_) {
                     $this->className = $node->name?->toString();
+                    $this->line = $node->getStartLine();
+                    foreach ($node->attrGroups as $group) {
+                        foreach ($group->attrs as $attribute) {
+                            $name = PhpFileParser::resolvedName($attribute->name) ?? $attribute->name->toString();
+                            $value = $attribute->args[0]->value ?? null;
+                            if (! $value instanceof Node\Scalar\String_) {
+                                continue;
+                            }
+                            if ($name === 'Illuminate\\Console\\Attributes\\Signature') {
+                                $this->signature = $value->value;
+                            }
+                            if ($name === 'Illuminate\\Console\\Attributes\\Description') {
+                                $this->description = $value->value;
+                            }
+                        }
+                    }
                 }
                 if ($node instanceof Node\Stmt\Property) {
                     foreach ($node->props as $prop) {
@@ -298,6 +384,7 @@ class ConsoleAnalyzer
                         class: $fqcn,
                         file: $this->file,
                         source: 'class',
+                        line: $this->line,
                     );
                 }
 
@@ -366,79 +453,7 @@ class ConsoleAnalyzer
                     }
                 }
 
-                // $schedule->command('sig')->daily()
-                // $schedule->job(new MyJob)->hourly()
-                // $schedule->call(function(){})->everyMinute()
-                if ($node instanceof Node\Expr\MethodCall) {
-                    $method = $node->name instanceof Node\Identifier
-                        ? $node->name->toString()
-                        : null;
-
-                    if ($method === 'command' && ! empty($node->args)) {
-                        $sig = $this->strArg($node->args[0]);
-                        if ($sig) {
-                            $this->schedule[] = new ScheduleEntry(
-                                type: 'command',
-                                target: $sig,
-                                frequency: $this->chainFrequency($node),
-                                file: $this->file,
-                            );
-                        }
-                    }
-
-                    if ($method === 'job' && ! empty($node->args)) {
-                        $arg = $node->args[0]->value;
-                        $target = '';
-                        if ($arg instanceof Node\Expr\New_ && $arg->class instanceof Node\Name) {
-                            $target = $this->resolveClass($arg->class->toString());
-                        }
-                        if ($target) {
-                            $this->schedule[] = new ScheduleEntry(
-                                type: 'job',
-                                target: $target,
-                                frequency: $this->chainFrequency($node),
-                                file: $this->file,
-                            );
-                        }
-                    }
-
-                    if ($method === 'call') {
-                        $this->schedule[] = new ScheduleEntry(
-                            type: 'call',
-                            target: 'Closure',
-                            frequency: $this->chainFrequency($node),
-                            file: $this->file,
-                        );
-                    }
-                }
-
                 return null;
-            }
-
-            /** Walk the method chain to find the first frequency-like method. */
-            private function chainFrequency(Node\Expr\MethodCall $node): string
-            {
-                $freq = ['everyMinute', 'everyFiveMinutes', 'everyTenMinutes',
-                    'everyFifteenMinutes', 'everyThirtyMinutes', 'hourly',
-                    'daily', 'dailyAt', 'weekly', 'weeklyOn', 'monthly',
-                    'monthlyOn', 'quarterly', 'yearly', 'cron',
-                    'everyTwoMinutes', 'everyThreeMinutes', 'twiceDaily',
-                    'twiceMonthly', 'lastDayOfMonth', 'timezone'];
-
-                // The node itself may be wrapped by frequency calls further up;
-                // we look at the var chain (the receiver of this call)
-                $current = $node;
-                while ($current instanceof Node\Expr\MethodCall) {
-                    $m = $current->name instanceof Node\Identifier
-                        ? $current->name->toString()
-                        : '';
-                    if (in_array($m, $freq, true)) {
-                        return $m;
-                    }
-                    $current = $current->var;
-                }
-
-                return '';
             }
 
             private function resolveClassConst(Node $node): string
@@ -457,19 +472,347 @@ class ConsoleAnalyzer
             {
                 return $this->useMap[$name] ?? $name;
             }
-
-            private function strArg(Node\Arg $arg): ?string
-            {
-                return $arg->value instanceof Node\Scalar\String_
-                    ? $arg->value->value
-                    : null;
-            }
         };
 
         $traverser->addVisitor($visitor);
         $traverser->traverse($parsed['ast']);
 
-        return ['commands' => $visitor->commands, 'schedule' => $visitor->schedule];
+        return [
+            'commands' => $visitor->commands,
+            'schedule' => $this->scheduleEntriesFromAst($parsed['ast'], $file, $useMap),
+        ];
+    }
+
+    /** @return ScheduleEntry[] */
+    private function parseScheduleFile(string $file): array
+    {
+        $parsed = $this->parser->parse($file);
+        if (! $parsed || ! $parsed['ast']) {
+            return [];
+        }
+
+        return $this->scheduleEntriesFromAst($parsed['ast'], $file, $parsed['useMap'] ?? []);
+    }
+
+    /**
+     * Read complete fluent schedule expressions at statement level so cadence calls and
+     * modifiers outside the target call are available together.
+     *
+     * @param  Node[]  $ast
+     * @param  array<string,string>  $useMap
+     * @return ScheduleEntry[]
+     */
+    private function scheduleEntriesFromAst(array $ast, string $file, array $useMap): array
+    {
+        $traverser = new NodeTraverser;
+        $collector = new class extends NodeVisitorAbstract
+        {
+            /** @var Node\Expr[] */
+            public array $expressions = [];
+
+            public function enterNode(Node $node): ?int
+            {
+                if ($node instanceof Node\Stmt\Expression) {
+                    $this->expressions[] = $node->expr;
+                }
+
+                return null;
+            }
+        };
+        $traverser->addVisitor($collector);
+        $traverser->traverse($ast);
+
+        $entries = [];
+        foreach ($collector->expressions as $expression) {
+            $entry = $this->scheduleEntryFromExpression($expression, $file, $useMap);
+            if ($entry !== null) {
+                $entries[] = $entry;
+            }
+        }
+
+        return $entries;
+    }
+
+    /** @param array<string,string> $useMap */
+    private function scheduleEntryFromExpression(Node\Expr $expression, string $file, array $useMap): ?ScheduleEntry
+    {
+        $current = $expression;
+        $outerCalls = [];
+        while ($current instanceof Node\Expr\MethodCall) {
+            if (! $current->name instanceof Node\Identifier) {
+                return null;
+            }
+            $outerCalls[] = [
+                'method' => $current->name->toString(),
+                'args' => $current->args,
+                'line' => $current->getStartLine(),
+            ];
+            $current = $current->var;
+        }
+
+        $rootMethod = '';
+        $rootArgs = [];
+        $rootLine = $expression->getStartLine();
+
+        $staticClass = $current instanceof Node\Expr\StaticCall && $current->class instanceof Node\Name
+            ? (PhpFileParser::resolvedName($current->class) ?? $useMap[$current->class->toString()] ?? $current->class->toString())
+            : '';
+        if ($current instanceof Node\Expr\StaticCall
+            && $current->name instanceof Node\Identifier
+            && $staticClass === 'Illuminate\\Support\\Facades\\Schedule') {
+            $rootMethod = $current->name->toString();
+            $rootArgs = $current->args;
+            $rootLine = $current->getStartLine();
+        } elseif ($current instanceof Node\Expr\Variable
+            && $current->name === 'schedule'
+            && $outerCalls !== []) {
+            $root = array_pop($outerCalls);
+            $rootMethod = $root['method'];
+            $rootArgs = $root['args'];
+            $rootLine = $root['line'];
+        } else {
+            return null;
+        }
+
+        if (! in_array($rootMethod, ['command', 'job', 'call'], true)) {
+            return null;
+        }
+
+        $chain = array_reverse($outerCalls);
+        $frequency = '';
+        $cadenceArguments = [];
+        $modifiers = [];
+        foreach ($chain as $call) {
+            $arguments = array_map(fn (Node\Arg $arg): mixed => $this->staticValue($arg->value, $useMap), $call['args']);
+            if ($frequency === '' && in_array($call['method'], self::CADENCE_METHODS, true)) {
+                $frequency = $call['method'];
+                $cadenceArguments = $arguments;
+            } else {
+                $modifiers[] = ['method' => $call['method'], 'arguments' => $arguments];
+            }
+        }
+
+        $target = 'Closure';
+        $rawInvocation = 'Closure';
+        $canonicalTarget = 'Closure';
+        $targetArguments = [];
+        $invocationArguments = [];
+        $invocationOptions = [];
+
+        if ($rootMethod === 'command') {
+            $first = $rootArgs[0]->value ?? null;
+            if (! $first instanceof Node\Scalar\String_) {
+                return null;
+            }
+            $target = $first->value;
+            $rawInvocation = $target;
+            $canonicalTarget = self::canonicalCommandName($target);
+            $tokens = $this->commandInvocationTokens($target);
+            foreach (array_slice($tokens, 1) as $token) {
+                if (str_starts_with($token, '--')) {
+                    $invocationOptions[] = $token;
+                } else {
+                    $invocationArguments[] = $token;
+                }
+            }
+            if (isset($rootArgs[1])) {
+                $value = $this->staticValue($rootArgs[1]->value, $useMap);
+                $targetArguments = is_array($value) ? $value : [$value];
+                foreach ($targetArguments as $key => $value) {
+                    if (is_string($key) && str_starts_with($key, '--')) {
+                        $invocationOptions[] = [$key => $value];
+                    } else {
+                        $invocationArguments[] = is_int($key) ? $value : [$key => $value];
+                    }
+                }
+            }
+        } elseif ($rootMethod === 'job') {
+            $target = $this->classTarget($rootArgs[0]->value ?? null, $useMap);
+            if ($target === '') {
+                return null;
+            }
+            $rawInvocation = $this->prettyExpression($rootArgs[0]->value);
+            $canonicalTarget = $target;
+        }
+
+        $cronExpression = $frequency === 'cron' && is_string($cadenceArguments[0] ?? null)
+            ? $cadenceArguments[0]
+            : null;
+
+        return new ScheduleEntry(
+            type: $rootMethod,
+            target: $target,
+            frequency: $frequency,
+            file: $file,
+            cadenceArguments: $cadenceArguments,
+            cronExpression: $cronExpression,
+            modifiers: $modifiers,
+            rawInvocation: $rawInvocation,
+            canonicalTarget: $canonicalTarget,
+            invocationArguments: $invocationArguments,
+            invocationOptions: $invocationOptions,
+            targetArguments: $targetArguments,
+            line: $rootLine,
+        );
+    }
+
+    /** @param array<string,string> $useMap */
+    private function classTarget(?Node $node, array $useMap): string
+    {
+        $class = null;
+        if ($node instanceof Node\Expr\New_ && $node->class instanceof Node\Name) {
+            $class = $node->class;
+        } elseif ($node instanceof Node\Expr\ClassConstFetch
+            && $node->class instanceof Node\Name
+            && $node->name instanceof Node\Identifier
+            && $node->name->toString() === 'class') {
+            $class = $node->class;
+        }
+        if ($class === null) {
+            return '';
+        }
+
+        $written = $class->toString();
+
+        return PhpFileParser::resolvedName($class) ?? $useMap[$written] ?? $written;
+    }
+
+    /** @param array<string,string> $useMap */
+    private function staticValue(Node $node, array $useMap): mixed
+    {
+        if ($node instanceof Node\Scalar\String_) {
+            return $node->value;
+        }
+        if ($node instanceof Node\Scalar\Int_ || $node instanceof Node\Scalar\Float_) {
+            return $node->value;
+        }
+        if ($node instanceof Node\Expr\ConstFetch) {
+            return match (strtolower($node->name->toString())) {
+                'true' => true,
+                'false' => false,
+                'null' => null,
+                default => $this->prettyExpression($node),
+            };
+        }
+        if ($node instanceof Node\Expr\ClassConstFetch
+            && $node->class instanceof Node\Name
+            && $node->name instanceof Node\Identifier
+            && $node->name->toString() === 'class') {
+            $written = $node->class->toString();
+
+            return (PhpFileParser::resolvedName($node->class) ?? $useMap[$written] ?? $written).'::class';
+        }
+        if ($node instanceof Node\Expr\Array_) {
+            $result = [];
+            foreach ($node->items as $item) {
+                if ($item === null) {
+                    continue;
+                }
+                $value = $this->staticValue($item->value, $useMap);
+                if ($item->key === null) {
+                    $result[] = $value;
+                } else {
+                    $key = $this->staticValue($item->key, $useMap);
+                    if (is_int($key) || is_string($key)) {
+                        $result[$key] = $value;
+                    }
+                }
+            }
+
+            return $result;
+        }
+
+        return $this->prettyExpression($node);
+    }
+
+    private function prettyExpression(?Node $node): string
+    {
+        if (! $node instanceof Node\Expr) {
+            return '';
+        }
+
+        return (new Standard)->prettyPrintExpr($node);
+    }
+
+    /** @return string[] */
+    private function commandInvocationTokens(string $invocation): array
+    {
+        $tokens = str_getcsv(trim($invocation), ' ', '"', '\\');
+
+        return array_values(array_filter($tokens, static fn (string $token): bool => $token !== ''));
+    }
+
+    public static function canonicalCommandName(string $signatureOrInvocation): string
+    {
+        $trimmed = trim($signatureOrInvocation);
+        if ($trimmed === '') {
+            return '';
+        }
+
+        return preg_split('/\s+/', $trimmed, 2)[0];
+    }
+
+    /**
+     * @param  ScheduleEntry[]  $schedule
+     * @param  ConsoleCommandDefinition[]  $commands
+     */
+    private function resolveScheduleTargets(array $schedule, array $commands, string $root): void
+    {
+        $byName = [];
+        foreach ($commands as $command) {
+            $byName[$command->canonicalName] = $command;
+        }
+
+        foreach ($schedule as $entry) {
+            if ($entry->type === 'command') {
+                $command = $byName[$entry->canonicalTarget] ?? null;
+                if ($command !== null && $command->sourceScope === 'application') {
+                    $entry->targetResolution = 'local';
+                    $entry->targetClass = $command->class !== '' ? $command->class : null;
+                    $entry->sourceScope = 'application';
+                }
+
+                continue;
+            }
+            if ($entry->type === 'job') {
+                $file = $this->resolveApplicationClassFile($entry->canonicalTarget, $root);
+                if ($file !== null) {
+                    $entry->targetResolution = 'local';
+                    $entry->targetClass = $entry->canonicalTarget;
+                    $entry->sourceScope = 'application';
+                }
+
+                continue;
+            }
+
+            $entry->targetResolution = 'local';
+            $entry->sourceScope = 'application';
+        }
+    }
+
+    private function resolveApplicationClassFile(string $fqcn, string $root): ?string
+    {
+        $composer = $root.'/composer.json';
+        if (is_file($composer)) {
+            $data = json_decode((string) file_get_contents($composer), true);
+            foreach (['autoload', 'autoload-dev'] as $section) {
+                foreach ($data[$section]['psr-4'] ?? [] as $namespace => $paths) {
+                    $namespace = rtrim((string) $namespace, '\\');
+                    if (! str_starts_with($fqcn, $namespace.'\\')) {
+                        continue;
+                    }
+                    $relative = str_replace('\\', '/', substr($fqcn, strlen($namespace) + 1)).'.php';
+                    foreach ((array) $paths as $path) {
+                        $file = $root.'/'.trim((string) $path, '/').'/'.$relative;
+                        if (is_file($file)) {
+                            return $file;
+                        }
+                    }
+                }
+            }
+        }
+
+        return null;
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
